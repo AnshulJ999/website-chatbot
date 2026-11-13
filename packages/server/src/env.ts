@@ -15,7 +15,7 @@ export interface Env {
   /** Cloudflare Access team domain (e.g. "myteam.cloudflareaccess.com") and the app's AUD tag. */
   ACCESS_TEAM_DOMAIN: string;
   ACCESS_AUD: string;
-  /** Domain whose inbound mail Email Routing hands to this Worker, e.g. reply.anshuljain.net */
+  /** Default reply-by-email domain for sites without their own replyDomain; empty = replies go to the site inbox. */
   REPLY_DOMAIN: string;
   /** "1" when OMNARA_API_KEY is a project API key: visitor messages then carry an Omnara actor. */
   OMNARA_ACTOR?: string;
@@ -30,6 +30,8 @@ export interface Env {
   /** Bearer token for machine access: kb-sync pushes and the Sitrep summary. */
   API_TOKEN: string;
   RESEND_API_KEY?: string;
+  /** Signing secret of the Resend webhook for email.received (reply-by-email through Resend Receiving). */
+  RESEND_WEBHOOK_SECRET?: string;
   NTFY_URL?: string;
   NTFY_TOKEN?: string;
   TURNSTILE_SECRET?: string;

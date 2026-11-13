@@ -129,6 +129,11 @@ export interface SiteConfig extends PublicSiteConfig {
   ownerEmail: string;
   /** Sender for emails to visitors, on a domain verified in Resend. */
   emailFrom: string;
+  /**
+   * Reply-by-email: visitors' replies go to chat+<tag>@<replyDomain> and land back in the chat. The domain's
+   * inbound mail must reach this server (Resend Receiving webhook or Cloudflare Email Routing). Default: REPLY_DOMAIN.
+   */
+  replyDomain?: string;
   /** Short name at the start of alert titles ("Portfolio chat - ..."); default: name. */
   alertName?: string;
   /** ntfy alerts: names of the server secrets holding the topic URL and its token (topics stay out of public repos). Default: NTFY_URL / NTFY_TOKEN. */

@@ -79,7 +79,29 @@ export async function readReplyTag(secret: string, tag: string): Promise<string 
   if (i < 0) return null;
   const chatId = tag.slice(0, i);
   const expected = (await sign(secret, `reply:${chatId}`)).slice(0, 16);
-  return expected === tag.slice(i + 1) ? chatId : null;
+  // Some mail systems lowercase addresses, so the check ignores case.
+  return expected.toLowerCase() === tag.slice(i + 1).toLowerCase() ? chatId.toLowerCase() : null;
+}
+
+/** Checks a Svix-signed webhook (Resend): HMAC-SHA256 of "<id>.<timestamp>.<body>", sent within 5 minutes. */
+export async function verifySvix(secret: string, h: { id?: string; timestamp?: string; signature?: string }, body: string): Promise<boolean> {
+  if (!h.id || !h.timestamp || !h.signature) return false;
+  if (Math.abs(Date.now() / 1000 - Number(h.timestamp)) > 300) return false;
+  const raw = Uint8Array.from(atob(secret.replace(/^whsec_/, "")), (ch) => ch.charCodeAt(0));
+  const key = await crypto.subtle.importKey("raw", raw, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${h.id}.${h.timestamp}.${body}`)));
+  const expected = btoa(String.fromCharCode(...mac));
+  return h.signature.split(" ").some((part) => {
+    const [version, sig] = part.split(",");
+    return version === "v1" && !!sig && sameString(sig, expected);
+  });
+}
+
+function sameString(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
 }
 
 export async function verifyTurnstile(env: Env, token: string | undefined, ip: string | null): Promise<boolean> {

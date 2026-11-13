@@ -2,7 +2,7 @@ import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
 import PostalMime from "postal-mime";
 import { newId, toPublic, type SessionRequest, type SessionResponse, type Settings, type SiteConfig } from "@website-chatbot/shared";
-import { makeOwnerPass, makeToken, readReplyTag, readToken, verifyAccess, verifyOwnerPass, verifySig, verifyTurnstile, visitorKey } from "./auth";
+import { makeOwnerPass, makeToken, readReplyTag, readToken, verifyAccess, verifyOwnerPass, verifySig, verifySvix, verifyTurnstile, visitorKey } from "./auth";
 import type { RoomInit } from "./chatroom";
 import * as db from "./db";
 import { DEMO_SITE } from "./demo-site";
@@ -351,6 +351,61 @@ function sanitizeSettings(p: Partial<Settings>): Partial<Settings> {
 
 // ---------- inbound email and the daily job ----------
 
+/** Resend Receiving: Resend posts a signed email.received notice; the text is fetched from its API. */
+app.post("/api/email/resend", async (c) => {
+  const secret = c.env.RESEND_WEBHOOK_SECRET;
+  if (!secret) return c.text("not configured", 404);
+  const body = await c.req.text();
+  const signed = await verifySvix(secret, { id: c.req.header("svix-id"), timestamp: c.req.header("svix-timestamp"), signature: c.req.header("svix-signature") }, body);
+  if (!signed) return c.text("bad signature", 400);
+  const event = JSON.parse(body) as { type?: string; data?: { email_id?: string } };
+  const id = event.data?.email_id;
+  if (event.type !== "email.received" || !id) return c.text("ignored");
+  // Answer at once: Resend retries anything slow or non-2xx.
+  c.executionCtx.waitUntil(receiveResend(c.env, id).catch((e) => console.error("resend inbound", id, e)));
+  return c.text("ok");
+});
+
+async function receiveResend(env: Env, id: string): Promise<void> {
+  // Retries of the same notice deliver once.
+  if (!(await db.alertDue(env.DB, `inbound:${id}`, 30 * 86_400_000))) return;
+  const res = await fetch(`https://api.resend.com/emails/receiving/${id}`, { headers: { Authorization: `Bearer ${env.RESEND_API_KEY}` } });
+  if (!res.ok) throw new Error(`fetch received email: ${res.status}`);
+  const mail = (await res.json()) as { from?: string; to?: string[]; text?: string | null; html?: string | null };
+  const text = mail.text ?? htmlToText(mail.html ?? "");
+  const result = await deliverReply(env, mail.to ?? [], mail.from ?? "", text);
+  if (result !== "ok") console.log("resend inbound", id, result, mail.to);
+}
+
+/** A visitor's email reply, from either inbound path: the address holds the chat's signed tag. */
+async function deliverReply(env: Env, to: string[], from: string, text: string): Promise<"ok" | "unknown" | "empty"> {
+  for (const raw of to) {
+    const address = /<([^>]+)>/.exec(raw)?.[1] ?? raw;
+    const local = address.trim().split("@")[0] ?? "";
+    if (!local.toLowerCase().startsWith("chat+")) continue;
+    const chatId = await readReplyTag(env.TOKEN_SECRET, local.slice(5));
+    if (!chatId) continue;
+    const body = stripQuoted(text);
+    if (!body) return "empty";
+    await room(env, chatId).emailReply(from, body);
+    return "ok";
+  }
+  return "unknown";
+}
+
+function htmlToText(html: string): string {
+  return html
+    .replace(/<(br|\/p|\/div|\/li)[^>]*>/gi, "\n")
+    .replace(/<blockquote[\s\S]*?<\/blockquote>/gi, "")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
 function stripQuoted(text: string): string {
   const lines = text.replace(/\r\n/g, "\n").split("\n");
   const out: string[] = [];
@@ -365,16 +420,15 @@ function stripQuoted(text: string): string {
 export default {
   fetch: app.fetch,
 
+  /** Cloudflare Email Routing: a literal rule for chat@<replyDomain> with subaddressing on hands replies here. */
   async email(message: ForwardableEmailMessage, env: Env): Promise<void> {
     const local = message.to.split("@")[0] ?? "";
-    const chatId = local.startsWith("chat+") ? await readReplyTag(env.TOKEN_SECRET, local.slice(5)) : null;
-    if (!chatId) {
+    if (!local.toLowerCase().startsWith("chat+") || !(await readReplyTag(env.TOKEN_SECRET, local.slice(5)))) {
       message.setReject("Unknown address");
       return;
     }
     const parsed = await PostalMime.parse(message.raw);
-    const text = stripQuoted(parsed.text ?? "");
-    if (text) await room(env, chatId).emailReply(message.from, text);
+    await deliverReply(env, [message.to], message.from, parsed.text ?? "");
   },
 
   /** Optional: with a cron trigger configured, the clean-up also runs on schedule. */

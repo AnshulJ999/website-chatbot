@@ -701,8 +701,9 @@ export class ChatRoom extends DurableObject<Env> {
 
   /** Where a visitor's email reply goes: back into this chat when reply-by-email is set up, else the site's inbox. */
   private async replyAddress(site: SiteConfig): Promise<string | undefined> {
-    if (!this.env.REPLY_DOMAIN) return site.ownerEmail;
-    return `chat+${await replyTag(this.env.TOKEN_SECRET, this.st.chatId)}@${this.env.REPLY_DOMAIN}`;
+    const domain = site.replyDomain || this.env.REPLY_DOMAIN;
+    if (!domain) return site.ownerEmail;
+    return `chat+${await replyTag(this.env.TOKEN_SECRET, this.st.chatId)}@${domain}`;
   }
 
   // ---------- RPC from the Worker ----------

@@ -66,7 +66,9 @@ Embed the widget:
 2. Set the `vars` in `wrangler.jsonc` and the secrets: `OMNARA_API_KEY`, `TOKEN_SECRET`, `API_TOKEN`, and optionally `RESEND_API_KEY`, `NTFY_URL`, `TURNSTILE_SECRET`, `GITHUB_TOKEN`.
 3. Protect `/admin` with a Cloudflare Access application and set `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD`.
 4. `npm run deploy`, then add a custom domain to the Worker.
-5. Optional: route a reply subdomain's email to the Worker with Email Routing and set `REPLY_DOMAIN`.
+5. Optional, reply-by-email: visitors' replies to the chatbot's emails go to `chat+<tag>@<replyDomain>` (per site `replyDomain`, or the `REPLY_DOMAIN` var) and land back in the chat. Use a subdomain with no other mail, and pick one way in:
+   - **Resend Receiving:** enable receiving on the domain in Resend, add its MX record, create a webhook for `email.received` pointing at `https://<server>/api/email/resend`, and set its signing secret as `RESEND_WEBHOOK_SECRET`.
+   - **Cloudflare Email Routing:** add the subdomain under the zone's Email Routing settings, turn on subaddressing, and send a literal rule for `chat@<replyDomain>` to this Worker (catch-all rules work only on the apex domain).
 
 ## Settings
 
