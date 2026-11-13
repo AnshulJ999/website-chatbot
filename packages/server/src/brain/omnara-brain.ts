@@ -22,17 +22,25 @@ export class OmnaraBrain implements Brain {
   async turn(state: BrainState, req: TurnRequest, cb: TurnCallbacks): Promise<TurnResult> {
     const actor: Actor | undefined = this.useActor ? { provider_tenant_id: req.site.key, provider_user_id: req.visitorId } : undefined;
     const config = agentConfig(req.site, req.tier);
+    const launch = async () => {
+      state.agentId = await this.api.launch({ name: `${req.site.key} chat`, config, text: req.text, actor, key: req.key });
+      state.lastSeq = 0;
+      state.model = req.tier.model;
+    };
     try {
-      if (!state.agentId) {
-        state.agentId = await this.api.launch({ name: `${req.site.key} chat`, config, text: req.text, actor, key: req.key });
-        state.lastSeq = 0;
-        state.model = req.tier.model;
-      } else {
-        if (state.model !== req.tier.model) {
-          await this.api.updateConfig(state.agentId, config);
-          state.model = req.tier.model;
+      if (!state.agentId) await launch();
+      else {
+        try {
+          if (state.model !== req.tier.model) {
+            await this.api.updateConfig(state.agentId, config);
+            state.model = req.tier.model;
+          }
+          await this.api.sendInput(state.agentId, req.text, actor, req.key);
+        } catch (e) {
+          // The chat's agent is gone (e.g. it lived in another Omnara project): carry on with a new one.
+          if (!(e instanceof OmnaraError && e.status === 404)) throw e;
+          await launch();
         }
-        await this.api.sendInput(state.agentId, req.text, actor, req.key);
       }
     } catch (e) {
       throw this.failure(e);
