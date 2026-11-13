@@ -472,13 +472,18 @@ export class ChatRoom extends DurableObject<Env> {
     }, 1000);
     if (this.env.CPU_TEST === "1" && this.st.dev?.cpuBurnMs) burnCpu(this.st.dev.cpuBurnMs);
     const req = { text, key, visitorId: this.st.visitorId, site, tier, streaming: settings.streaming && !this.st.noStreaming, signal: abort.signal };
+    let deltas = 0;
     const cb = {
       touch: () => (last = this.lastTouch = Date.now()),
       progress: (p: string) => {
         this.progress = p;
         this.broadcastStatus(settings);
       },
-      delta: (raw: string) => this.queueDelta(raw, settings.deltaBatchMs),
+      delta: (raw: string) => {
+        this.queueDelta(raw, settings.deltaBatchMs);
+        // Cut-off test: restart this object mid-answer, the way a CPU-limit kill would.
+        if (!resume && this.st.dev?.cutoff && ++deltas === 15) this.ctx.abort("cut-off test");
+      },
       deltaReset: () => {
         this.dropDeltas();
         this.broadcast({ t: "delta_reset" });

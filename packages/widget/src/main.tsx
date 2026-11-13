@@ -100,6 +100,7 @@ export async function boot(opts: WidgetOptions): Promise<void> {
   }
   applyTheme(host, { ...s.theme, ...opts.theme });
   ui.value = { ...DEFAULT_UI, ...s.ui, ...opts.ui };
+  client.hydrate();
   render(<App client={client} />, mount);
   scheduleBubble(s);
 

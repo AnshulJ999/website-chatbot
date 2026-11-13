@@ -1,4 +1,4 @@
-import { newId, type AnalyticsEvent, type ClientMsg, type ServerMsg, type SessionRequest, type SessionResponse } from "@website-chatbot/shared";
+import { newId, type AnalyticsEvent, type ChatMessage, type ClientMsg, type ServerMsg, type SessionRequest, type SessionResponse } from "@website-chatbot/shared";
 import { flash, live, pageUrl, patch, site } from "./store";
 
 export interface ClientOptions {
@@ -20,6 +20,27 @@ interface Saved {
 }
 
 const storeKey = (site: string) => `wcb:${site}`;
+const cacheKey = (site: string) => `wcb:${site}:cache`;
+
+/** A copy of the current chat, shown at once on the next page load while the server's copy loads. */
+interface Cache {
+  chatId: string;
+  messages: ChatMessage[];
+}
+
+export interface PastChat {
+  id: string;
+  preview: string;
+  updatedAt: number;
+}
+
+function readCache(siteKey: string): Cache | null {
+  try {
+    return JSON.parse(localStorage.getItem(cacheKey(siteKey)) ?? "null") as Cache | null;
+  } catch {
+    return null;
+  }
+}
 
 function load(siteKey: string): Saved {
   try {
@@ -60,6 +81,26 @@ export class ChatClient {
   private starting?: Promise<boolean>;
 
   constructor(private readonly o: ClientOptions) {}
+
+  /** Shows the saved chat straight away; the server's copy replaces it once connected. */
+  hydrate(): void {
+    const saved = load(this.o.siteKey);
+    if (!saved.chatId) return;
+    const cache = readCache(this.o.siteKey);
+    if (cache?.chatId === saved.chatId && cache.messages.length) patch({ messages: cache.messages });
+    else patch({ loading: true });
+  }
+
+  private saveCache(): void {
+    const chatId = this.session?.chatId;
+    if (!chatId) return;
+    const messages = live.value.messages.filter((m) => m.seq !== Number.MAX_SAFE_INTEGER).slice(-60);
+    try {
+      localStorage.setItem(cacheKey(this.o.siteKey), JSON.stringify({ chatId, messages } satisfies Cache));
+    } catch {
+      // no copy kept; the chat still loads from the server
+    }
+  }
 
   /** Dev only: brain and scenario for the next session. */
   setDev(dev: ClientOptions["dev"]): void {
@@ -108,7 +149,7 @@ export class ChatClient {
     this.session = (await res.json()) as SessionResponse;
     site.value = this.session.site;
     persist(this.o.siteKey, { visitorId: this.session.visitorId, visitorKey: this.session.visitorKey, chatId: this.session.chatId });
-    if (newChat) patch({ messages: [], preview: "", formDismissed: false });
+    if (newChat) patch({ messages: [], preview: "", formDismissed: false, loading: false });
     this.connect();
     return true;
   }
@@ -169,17 +210,20 @@ export class ChatClient {
     const msg = JSON.parse(data) as ServerMsg;
     switch (msg.t) {
       case "history":
-        patch({ messages: msg.messages, status: msg.status, preview: "" });
+        patch({ messages: msg.messages, status: msg.status, preview: "", loading: false });
+        this.saveCache();
         return;
       case "message": {
         const list = live.value.messages.filter((m) => m.id !== msg.message.id);
         list.push(msg.message);
         list.sort((a, b) => a.seq - b.seq);
         patch({ messages: list, preview: msg.message.role === "ai" ? "" : live.value.preview });
+        this.saveCache();
         return;
       }
       case "update":
         patch({ messages: live.value.messages.map((m) => (m.id === msg.message.id ? msg.message : m)) });
+        this.saveCache();
         return;
       case "status":
         if (msg.status.reason === "owner_away" && live.value.status.reason !== "owner_away") patch({ formDismissed: false });
@@ -237,6 +281,32 @@ export class ChatClient {
 
   newChat(): Promise<boolean> {
     return this.start(true);
+  }
+
+  /** The visitor's earlier chats on this site (this browser's visitor only). */
+  async pastChats(): Promise<PastChat[]> {
+    const saved = load(this.o.siteKey);
+    if (!saved.visitorId || !saved.visitorKey) return [];
+    try {
+      const res = await fetch(`${this.o.server}/api/my-chats`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ site: this.o.siteKey, visitorId: saved.visitorId, visitorKey: saved.visitorKey }),
+      });
+      if (!res.ok) return [];
+      const { chats } = (await res.json()) as { chats: PastChat[] };
+      return chats.filter((c) => c.id !== (this.session?.chatId ?? saved.chatId));
+    } catch {
+      return [];
+    }
+  }
+
+  /** Reopens one of the visitor's earlier chats. */
+  switchTo(chatId: string): Promise<boolean> {
+    persist(this.o.siteKey, { ...load(this.o.siteKey), chatId });
+    patch({ messages: [], preview: "", formDismissed: false, loading: true });
+    this.starting = this.doStart(false).finally(() => (this.starting = undefined));
+    return this.starting;
   }
 
   private watchPage(): void {

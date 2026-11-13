@@ -85,6 +85,8 @@ export interface DevOptions {
   ownerName?: string;
   /** CPU test: burn about this much server CPU once per answer. Only acts when the server has CPU_TEST=1. */
   cpuBurnMs?: number;
+  /** Cut-off test: the chat's server object restarts partway through the next streamed answer. */
+  cutoff?: boolean;
   /** Owner pass from /admin/api/dev-pass; lets the hosted Playground use these options. */
   pass?: string;
 }

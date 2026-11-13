@@ -20,7 +20,8 @@
   position: fixed;
   /* A host page can move the launcher with --wc-bottom / --wc-side (e.g. above its own corner buttons). */
   bottom: var(--wc-bottom, 20px);
-  z-index: 2147483000;
+  /* Below review tools (Notes, Design) so their highlights draw over the chat. */
+  z-index: 2147482000;
   font-family: var(--wc-font, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
   font-size: 14px;
   line-height: 1.5;
@@ -174,6 +175,22 @@ a {
 .corner-right .panel-sheet {
   right: 0;
   border-width: 0 0 0 1px;
+  animation: sheet-in-right 0.22s ease;
+}
+.corner-left .panel-sheet {
+  animation-name: sheet-in-left;
+}
+@keyframes sheet-in-right {
+  from {
+    opacity: 0.4;
+    transform: translateX(24px);
+  }
+}
+@keyframes sheet-in-left {
+  from {
+    opacity: 0.4;
+    transform: translateX(-24px);
+  }
 }
 .corner-left .panel-sheet {
   left: 0;
@@ -209,6 +226,21 @@ a {
 }
 .corner-left .resize {
   right: -4px;
+}
+.resize-corner {
+  position: absolute;
+  top: -4px;
+  width: 16px;
+  height: 16px;
+  z-index: 3;
+}
+.corner-right .resize-corner {
+  left: -4px;
+  cursor: nwse-resize;
+}
+.corner-left .resize-corner {
+  right: -4px;
+  cursor: nesw-resize;
 }
 
 .head {
@@ -435,10 +467,80 @@ a {
   display: flex;
   gap: 2px;
   opacity: 0.6;
+  transition: opacity 0.15s ease;
+}
+.actions-hover .thumbs {
+  opacity: 0;
 }
 .msg-wrap:hover .thumbs,
 .thumbs:focus-within {
   opacity: 1;
+}
+@media (hover: none) {
+  .actions-hover .thumbs {
+    opacity: 0.6;
+  }
+}
+.loading {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 0;
+  animation: appear 0.2s ease;
+}
+.loading i {
+  display: block;
+  height: 40px;
+  width: 78%;
+  border-radius: var(--radius);
+  background: linear-gradient(90deg, var(--muted, rgba(127, 127, 127, 0.12)) 0%, rgba(127, 127, 127, 0.22) 50%, var(--muted, rgba(127, 127, 127, 0.12)) 100%);
+  background-size: 200% 100%;
+  animation: shimmer 1.2s linear infinite;
+}
+.loading i:nth-child(2) {
+  width: 52%;
+  align-self: flex-end;
+}
+.loading i:nth-child(3) {
+  width: 66%;
+}
+@keyframes shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}
+@keyframes appear {
+  from {
+    opacity: 0;
+  }
+}
+.past {
+  display: flex;
+  flex-direction: column;
+  max-height: 200px;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  margin: 2px 0;
+}
+.menu .past-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 13px;
+}
+.past-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  text-align: left;
+}
+.past-when {
+  flex: none;
+  color: var(--muted-fg);
+  font-size: 12px;
 }
 .system {
   align-self: center;
@@ -539,10 +641,6 @@ a {
   gap: 4px;
   font-size: 12px;
   font-weight: 600;
-}
-.optional {
-  font-weight: 400;
-  color: var(--muted-fg);
 }
 input,
 textarea {
@@ -668,11 +766,13 @@ textarea {
     position: fixed;
     inset: 0;
     width: 100% !important;
-    height: 100%;
+    height: 100% !important;
     border-radius: 0;
     border: 0;
   }
-  .resize {
+  .resize,
+  .resize-corner,
+  .expand-btn {
     display: none;
   }
   /* The full-screen panel has its own close button. */
@@ -685,7 +785,8 @@ textarea {
   }
 }
 @media (pointer: coarse) {
-  .resize {
+  .resize,
+  .resize-corner {
     display: none;
   }
 }

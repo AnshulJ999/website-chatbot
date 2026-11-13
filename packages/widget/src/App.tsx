@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 import { isEmail, renderMarkdown, startersFor, visiblePreview, type ChatMessage, type GetInTouchReason, type PublicSiteConfig } from "@website-chatbot/shared";
-import { emit, type ChatClient } from "./client";
+import { emit, type ChatClient, type PastChat } from "./client";
 import { Icon } from "./icons";
 
 import { currentPath, forced, live, notice, setView, site, ui, type View } from "./store";
@@ -33,7 +33,7 @@ export function App({ client }: { client: ChatClient }) {
   const isOpen = v.open && !closing;
 
   return (
-    <div class={`root corner-${u.corner} ${v.open ? "is-open" : ""}`}>
+    <div class={`root corner-${u.corner} actions-${u.actions} ${v.open ? "is-open" : ""}`}>
       {v.open && <Panel client={client} site={s} v={v} closing={closing} onClose={close} />}
       {!v.open && v.bubble && s.proactive.text && (
         <div class="bubble" role="status">
@@ -64,7 +64,10 @@ function Panel({ client, site: s, v, closing, onClose }: { client: ChatClient; s
   const u = ui.value;
   const st = v.status;
   const panelRef = useRef<HTMLDivElement>(null);
-  const width = useResize(panelRef);
+  const size = useResize(panelRef);
+  const [expanded, setExpanded] = useExpanded();
+  const sheet = expanded || u.panel === "sheet";
+  const sizeStyle = sheet ? undefined : { ...(size.w ? { width: `${size.w}px` } : {}), ...(size.h ? { height: `${size.h}px` } : {}) };
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -82,8 +85,9 @@ function Panel({ client, site: s, v, closing, onClose }: { client: ChatClient; s
   const talkVisible = st.mode === "ai" && !st.ownerJoined;
 
   return (
-    <div class={`panel panel-${u.panel} ${closing ? "closing" : ""}`} ref={panelRef} style={width ? { width: `${width}px` } : undefined} role="dialog" aria-label={s.assistantName}>
-      <ResizeHandle panel={panelRef} />
+    <div class={`panel panel-${sheet ? "sheet" : u.panel} ${closing ? "closing" : ""}`} ref={panelRef} style={sizeStyle} role="dialog" aria-label={s.assistantName}>
+      {!sheet && <ResizeHandle panel={panelRef} axis="x" />}
+      {!sheet && <ResizeHandle panel={panelRef} axis="xy" />}
       <header class="head">
         <div class="head-title">
           <strong>{s.assistantName}</strong>
@@ -100,6 +104,11 @@ function Panel({ client, site: s, v, closing, onClose }: { client: ChatClient; s
             )}
           </span>
         </div>
+        {u.panel !== "sheet" && (
+          <button class="icon-btn expand-btn" aria-label={expanded ? "Make the chat smaller" : "Make the chat bigger"} title={expanded ? "Smaller" : "Bigger"} aria-pressed={expanded} onClick={() => setExpanded(!expanded)}>
+            <Icon name={expanded ? "shrink" : "expand"} />
+          </button>
+        )}
         <button class="icon-btn" aria-label="Chat options" aria-expanded={v.menu} onClick={() => setView({ menu: !v.menu })}>
           <Icon name="dots" />
         </button>
@@ -164,6 +173,7 @@ function TalkLink({ client, site: s, v }: { client: ChatClient; site: PublicSite
 function Menu({ client, site: s, v }: { client: ChatClient; site: PublicSiteConfig; v: View }) {
   const [emailing, setEmailing] = useState(false);
   const [email, setEmail] = useState(v.status.visitorEmail ?? "");
+  const [past, setPast] = useState<PastChat[] | null>(null);
   const u = ui.value;
   const close = () => setView({ menu: false });
   return (
@@ -171,6 +181,22 @@ function Menu({ client, site: s, v }: { client: ChatClient; site: PublicSiteConf
       <button role="menuitem" onClick={() => (close(), void client.newChat())}>
         <Icon name="plus" /> Start new chat
       </button>
+      <button role="menuitem" aria-expanded={!!past} onClick={async () => setPast(past ? null : await client.pastChats())}>
+        <Icon name="history" /> Past chats
+      </button>
+      {past &&
+        (past.length ? (
+          <div class="past">
+            {past.map((p) => (
+              <button key={p.id} role="menuitem" class="past-item" onClick={() => (close(), void client.switchTo(p.id))}>
+                <span class="past-text">{p.preview.replace(/^\w+: /, "").replace(/[*_#`>[\]]/g, "").replace(/\s+/g, " ").trim() || "Chat"}</span>
+                <span class="past-when">{new Date(p.updatedAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <p class="menu-note">No earlier chats in this browser.</p>
+        ))}
       {!emailing ? (
         <button role="menuitem" disabled={!v.messages.length} onClick={() => setEmailing(true)}>
           <Icon name="mail" /> Email me this chat…
@@ -241,7 +267,7 @@ function Messages({ client, site: s, v, formReason }: { client: ChatClient; site
         <Unreachable site={s} />
       ) : (
         <>
-          <Welcome client={client} site={s} v={v} />
+          {v.loading && !v.messages.length ? <Loading /> : <Welcome client={client} site={s} v={v} />}
           {v.messages.map((m) => (
             <Message key={m.id} m={m} site={s} client={client} />
           ))}
@@ -319,16 +345,51 @@ function Message({ m, site: s, client }: { m: ChatMessage; site: PublicSiteConfi
     <div class={`msg-wrap ${m.role}`}>
       {isOwner && <span class="who">{cap(s.ownerName)}</span>}
       <div class={`msg ${m.role}`} dangerouslySetInnerHTML={{ __html: renderMarkdown(m.text) }} />
-      {!isOwner && (
-        <div class="thumbs">
-          <button class={`icon-btn tiny ${m.feedback === 1 ? "active" : ""}`} aria-label="Helpful" aria-pressed={m.feedback === 1} onClick={() => client.feedback(m.id, m.feedback === 1 ? 0 : 1)}>
-            <Icon name="up" />
-          </button>
-          <button class={`icon-btn tiny ${m.feedback === -1 ? "active" : ""}`} aria-label="Not helpful" aria-pressed={m.feedback === -1} onClick={() => client.feedback(m.id, m.feedback === -1 ? 0 : -1)}>
-            <Icon name="down" />
-          </button>
-        </div>
-      )}
+      <div class="thumbs">
+        <CopyButton text={m.text} />
+        {!isOwner && (
+          <>
+            <button class={`icon-btn tiny ${m.feedback === 1 ? "active" : ""}`} aria-label="Helpful" aria-pressed={m.feedback === 1} onClick={() => client.feedback(m.id, m.feedback === 1 ? 0 : 1)}>
+              <Icon name="up" />
+            </button>
+            <button class={`icon-btn tiny ${m.feedback === -1 ? "active" : ""}`} aria-label="Not helpful" aria-pressed={m.feedback === -1} onClick={() => client.feedback(m.id, m.feedback === -1 ? 0 : -1)}>
+              <Icon name="down" />
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      class={`icon-btn tiny ${copied ? "active" : ""}`}
+      aria-label={copied ? "Copied" : "Copy"}
+      title={copied ? "Copied" : "Copy"}
+      onClick={() =>
+        navigator.clipboard?.writeText(text).then(
+          () => {
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1500);
+          },
+          () => undefined,
+        )
+      }
+    >
+      <Icon name={copied ? "check" : "copy"} />
+    </button>
+  );
+}
+
+function Loading() {
+  return (
+    <div class="loading" role="status" aria-label="Loading your chat">
+      <i />
+      <i />
+      <i />
     </div>
   );
 }
@@ -380,7 +441,7 @@ function GetInTouch({ client, site: s, reason, v }: { client: ChatClient; site: 
       <strong>{copy.title}</strong>
       <p>{copy.text}</p>
       <label>
-        Name <span class="optional">(optional)</span>
+        Name
         <input value={name} autoComplete="name" onInput={(e) => setName(e.currentTarget.value)} />
       </label>
       <label>
@@ -495,25 +556,32 @@ function Composer({ client, v, talk }: { client: ChatClient; v: View; talk: prea
   );
 }
 
-const WIDTH_KEY = "wcb:width";
+const SIZE_KEY = "wcb:size";
+const EXPANDED_KEY = "wcb:expanded";
+type Size = { w: number | null; h: number | null };
 
-function useResize(panel: { current: HTMLDivElement | null }): number | null {
-  const [width, setWidth] = useState<number | null>(() => {
-    try {
-      const w = Number(localStorage.getItem(WIDTH_KEY));
-      return w > 0 ? w : null;
-    } catch {
-      return null;
-    }
-  });
+function readSize(): Size {
+  try {
+    const s = JSON.parse(localStorage.getItem(SIZE_KEY) ?? "null") as Size | null;
+    if (s) return s;
+    const w = Number(localStorage.getItem("wcb:width"));
+    return { w: w > 0 ? w : null, h: null };
+  } catch {
+    return { w: null, h: null };
+  }
+}
+
+/** The visitor's own panel size, remembered in this browser. */
+function useResize(panel: { current: HTMLDivElement | null }): Size {
+  const [size, setSize] = useState<Size>(readSize);
   useEffect(() => {
     const el = panel.current;
     if (!el) return;
     const onResize = (e: Event) => {
-      const w = (e as CustomEvent<number>).detail;
-      setWidth(w);
+      const s = (e as CustomEvent<Size>).detail;
+      setSize(s);
       try {
-        localStorage.setItem(WIDTH_KEY, String(w));
+        localStorage.setItem(SIZE_KEY, JSON.stringify(s));
       } catch {
         // not remembered; fine
       }
@@ -521,31 +589,58 @@ function useResize(panel: { current: HTMLDivElement | null }): number | null {
     el.addEventListener("wcb-resize", onResize);
     return () => el.removeEventListener("wcb-resize", onResize);
   }, [panel]);
-  return width;
+  return size;
 }
 
-/** Drag handle on the panel's inner edge (desktop only; hidden by CSS on touch and narrow screens). */
-function ResizeHandle({ panel }: { panel: { current: HTMLDivElement | null } }) {
-  const MIN = 340;
-  const MAX = 640;
+/** The "bigger" button's state (opens the side sheet), remembered in this browser. */
+function useExpanded(): [boolean, (v: boolean) => void] {
+  const [expanded, set] = useState(() => {
+    try {
+      return localStorage.getItem(EXPANDED_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  const update = (v: boolean) => {
+    set(v);
+    try {
+      localStorage.setItem(EXPANDED_KEY, v ? "1" : "0");
+    } catch {
+      // not remembered; fine
+    }
+  };
+  return [expanded, update];
+}
+
+/** Drag handles: the inner edge sets the width, the top inner corner sets width and height (desktop only). */
+function ResizeHandle({ panel, axis }: { panel: { current: HTMLDivElement | null }; axis: "x" | "xy" }) {
+  const MIN_W = 340;
+  const MAX_W = 720;
+  const MIN_H = 360;
   const onDown = (e: PointerEvent) => {
     const el = panel.current;
     if (!el) return;
     e.preventDefault();
     const fromRight = ui.value.corner === "right";
     const startX = e.clientX;
-    const startW = el.getBoundingClientRect().width;
+    const startY = e.clientY;
+    const r = el.getBoundingClientRect();
+    // The panel grows upwards from its bottom edge; keep 8px clear of the top of the window.
+    const maxH = Math.max(MIN_H, r.bottom - 8);
     const move = (ev: PointerEvent) => {
       const dx = fromRight ? startX - ev.clientX : ev.clientX - startX;
-      el.style.width = `${Math.max(MIN, Math.min(MAX, startW + dx))}px`;
+      el.style.width = `${Math.max(MIN_W, Math.min(MAX_W, r.width + dx))}px`;
+      if (axis === "xy") el.style.height = `${Math.max(MIN_H, Math.min(maxH, r.height + startY - ev.clientY))}px`;
     };
     const up = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
-      el.dispatchEvent(new CustomEvent("wcb-resize", { detail: el.getBoundingClientRect().width }));
+      const now = el.getBoundingClientRect();
+      const prev = readSize();
+      el.dispatchEvent(new CustomEvent("wcb-resize", { detail: { w: now.width, h: axis === "xy" ? now.height : prev.h } satisfies Size }));
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
   };
-  return <div class="resize" onPointerDown={onDown} aria-hidden="true" title="Drag to resize" />;
+  return <div class={axis === "x" ? "resize" : "resize-corner"} onPointerDown={onDown} aria-hidden="true" title={axis === "x" ? "Drag to change the width" : "Drag to change the size"} />;
 }

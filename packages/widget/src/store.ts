@@ -14,6 +14,8 @@ export interface View {
   menu: boolean;
   /** The visitor closed the owner-away form for now. */
   formDismissed: boolean;
+  /** A saved chat is on its way from the server and no local copy exists yet. */
+  loading?: boolean;
 }
 
 export const EMPTY_STATUS: ChatStatus = {

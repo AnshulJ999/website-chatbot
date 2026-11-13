@@ -3,20 +3,8 @@
 import { DEFAULT_UI, type ChatMessage, type ChatStatus, type PublicSiteConfig, type WidgetUi } from "@website-chatbot/shared";
 import type { ChatClient } from "./client";
 import type { WidgetOptions } from "./main";
+import { OWNER_NAMES, TALK_WORDING } from "./dev-wording";
 import { EMPTY_STATUS, forced, live, pageOverride, patch, site, ui, type View } from "./store";
-
-const TALK_WORDING: Record<string, string> = {
-  a: "Talk to a person",
-  b: "Talk to the developer",
-  c: "Contact support",
-};
-
-const OWNER_NAMES: Record<string, string> = {
-  anshul: "Anshul",
-  developer: "the developer",
-  team: "the KopiaLens team",
-  mix: "Anshul (the developer)",
-};
 
 let base: Pick<PublicSiteConfig, "talkLabel" | "ownerName" | "proactive"> | null = null;
 let lastDev = "";
@@ -33,18 +21,22 @@ export function initDev(_host: HTMLElement, opts: WidgetOptions, client: ChatCli
       suggestions: pick("suggestions", d.dSuggestions),
       talkPlacement: pick("talkPlacement", d.dTalk),
       notice: pick("notice", d.dNotice),
+      actions: pick("actions", d.dActions),
     };
 
     const ownerName = d.dOwner && OWNER_NAMES[d.dOwner];
     if (site.value) {
       base ??= { talkLabel: site.value.talkLabel, ownerName: site.value.ownerName, proactive: site.value.proactive };
       const talkLabel = (d.dTalkword && TALK_WORDING[d.dTalkword]) || base.talkLabel;
-      const proactive = d.dGreeting === "bubble" ? { ...base.proactive, enabled: true, text: base.proactive.text || `Questions about ${site.value.name}? Ask here.` } : base.proactive;
+      const greetOn = d.dGreeting ? d.dGreeting === "on" : base.proactive.enabled;
+      const delaySec = Number(d.dGreetdelay) || base.proactive.delaySec;
+      const proactive = { ...base.proactive, enabled: greetOn, delaySec, text: base.proactive.text || `Questions about ${site.value.name}? Ask here.` };
       const next = { ...site.value, talkLabel, ownerName: ownerName || base.ownerName, proactive };
-      if (next.talkLabel !== site.value.talkLabel || next.ownerName !== site.value.ownerName || next.proactive !== site.value.proactive) site.value = next;
+      const p = site.value.proactive;
+      if (next.talkLabel !== site.value.talkLabel || next.ownerName !== site.value.ownerName || p.enabled !== greetOn || p.delaySec !== delaySec || p.text !== proactive.text) site.value = next;
       clearTimeout(bubbleTimer);
-      if (d.dGreeting === "bubble" && !live.value.open && !live.value.messages.length) bubbleTimer = window.setTimeout(() => patch({ bubble: true }), 3000);
-      else if (d.dGreeting !== "bubble") patch({ bubble: false });
+      if (greetOn && !live.value.open && !live.value.messages.length) bubbleTimer = window.setTimeout(() => patch({ bubble: true }), delaySec * 1000);
+      else if (!greetOn) patch({ bubble: false });
     }
 
     pageOverride.value = d.pgPage || null;
@@ -55,6 +47,7 @@ export function initDev(_host: HTMLElement, opts: WidgetOptions, client: ChatCli
       brain: (d.pgBrain ?? "scripted") as "real" | "scripted",
       scenario: d.pgScenario ?? "none",
       ...(d.pgBrain === "real" && Number(d.pgCpu) > 0 ? { cpuBurnMs: Number(d.pgCpu) } : {}),
+      ...(d.pgBrain === "real" && d.pgCutoff === "1" ? { cutoff: true } : {}),
       ...(ownerName ? { ownerName } : {}),
     };
     const key = JSON.stringify(dev);

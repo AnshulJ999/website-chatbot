@@ -1,5 +1,6 @@
 import type { PublicSiteConfig, ThemeMap } from "@website-chatbot/shared";
 import { applyTheme } from "../src/theme";
+import { OWNER_NAMES, TALK_WORDING } from "../src/dev-wording";
 
 // The Playground: the real widget on a plain page. Left panel = test setup (data-pg-* on <html>);
 // Design menu = look choices (data-d-*). Notes + Design come from the local notes server.
@@ -67,31 +68,43 @@ const STATES = [
 ];
 const SCENARIOS = [opt("none", "Normal"), opt("fail_first", "First model fails"), opt("slow", "Reply stalls"), opt("omnara_down", "Omnara down"), opt("cap", "Chat over its cap")];
 const CPU_TESTS = [opt("0", "Off"), opt("50", "About 50 ms"), opt("200", "About 200 ms"), opt("1000", "About 1 s")];
+const CUTOFF_TESTS = [opt("0", "Off"), opt("1", "Cut off mid-answer")];
 
-// Look choices only: the test setup lives in the panel.
-const DESIGN_ROWS = [
+const capFirst = (t: string) => t.charAt(0).toUpperCase() + t.slice(1);
+
+/** A wording row whose default is the site's own value, shown by name rather than as "site setting". */
+function wordingRow(key: string, label: string, note: string, table: Record<string, string>, current: string | undefined) {
+  const options = Object.entries(table).map(([id, text]) => opt(id, capFirst(text)));
+  const match = Object.entries(table).find(([, text]) => text.toLowerCase() === current?.toLowerCase())?.[0];
+  if (!match && current) options.unshift(opt("site", capFirst(current)));
+  return { key, label, note, options, fallback: match ?? "site" };
+}
+
+// Look choices only: the test setup lives in the panel. Defaults come from the site's config.
+function designRows() {
+  const cfg = siteConfig;
+  const delays = ["3", "6", "10", "30"];
+  const delay = String(cfg?.proactive.delaySec ?? 6);
+  if (!delays.includes(delay)) delays.push(delay);
+  return [
+    ...BASE_ROWS,
+    wordingRow("talkword", "\"Talk to\" wording", "Shows in the bar, menu or above the message box.", TALK_WORDING, cfg?.talkLabel),
+    wordingRow("owner", "What the bot calls you", "Shows in the \"asked to join\", \"is here\", away-form, message-sent and offline texts, and in the AI's replies. Starts a new chat when changed.", OWNER_NAMES, cfg?.ownerName),
+    { key: "greeting", label: "Pop-up greeting", note: "A small bubble above the closed chat button. Shows only while the chat is closed and empty.", options: [opt("off", "Off"), opt("on", "On")], fallback: cfg?.proactive.enabled ? "on" : "off" },
+    { key: "greetdelay", label: "Greeting delay", note: "Seconds after the page loads.", options: delays.map((s) => opt(s, `${s} seconds`)), fallback: delay },
+  ];
+}
+
+const BASE_ROWS = [
   { key: "launcher", label: "Launcher", options: [opt("icon", "Round icon"), opt("pill", "Pill with name")], fallback: "icon" },
   { key: "corner", label: "Corner", options: [opt("right", "Bottom right"), opt("left", "Bottom left")], fallback: "right" },
   { key: "panel", label: "Panel size", options: [opt("compact", "Compact"), opt("tall", "Tall"), opt("sheet", "Side sheet")], fallback: "compact" },
   { key: "suggestions", label: "Suggested replies", options: [opt("chips", "Chips in a row"), opt("list", "Stacked list")], fallback: "chips" },
   { key: "talk", label: "\"Talk to\" button", options: [opt("bar", "Bar under header"), opt("composer", "Above message box"), opt("menu", "Menu only")], fallback: "bar" },
   { key: "notice", label: "\"Chats are saved\" notice", options: [opt("welcome", "Once, in welcome"), opt("under", "Under the box"), opt("menu", "Menu only")], fallback: "welcome" },
-  {
-    key: "talkword",
-    label: "\"Talk to\" wording",
-    note: "Site setting = what the site's config says.",
-    options: [opt("site", "Site setting"), opt("a", "Talk to a person"), opt("b", "Talk to the developer"), opt("c", "Contact support")],
-    fallback: "site",
-  },
-  {
-    key: "owner",
-    label: "What the bot calls you",
-    note: "Used by the AI's replies, the forms and the \"joined\" line. Starts a new chat when changed.",
-    options: [opt("site", "Site setting"), opt("anshul", "Anshul"), opt("developer", "The developer"), opt("team", "The KopiaLens team"), opt("mix", "Anshul (the developer)")],
-    fallback: "site",
-  },
-  { key: "greeting", label: "Pop-up greeting", note: "Bubble shows 3 s after the page loads while the chat is closed.", options: [opt("site", "Site setting"), opt("bubble", "Bubble above the launcher")], fallback: "site" },
+  { key: "actions", label: "Answer buttons (copy, rate)", options: [opt("hover", "On hover"), opt("always", "Always shown")], fallback: "hover" },
 ];
+let DESIGN_ROWS: unknown[] = [];
 
 interface DesignApi {
   apply(rows: unknown[], o?: Record<string, unknown>): void;
@@ -110,9 +123,9 @@ const root = document.documentElement;
 
 // ---- Test setup (panel) state ----
 
-const PG_KEYS = ["site", "page", "theme", "device", "brain", "scenario", "cpu", "state"] as const;
+const PG_KEYS = ["site", "page", "theme", "device", "brain", "scenario", "cpu", "cutoff", "state"] as const;
 type PgKey = (typeof PG_KEYS)[number];
-const PG_DEFAULTS: Record<PgKey, string> = { site: "kopialens", page: "", theme: "", device: "desktop", brain: "scripted", scenario: "none", cpu: "0", state: "live" };
+const PG_DEFAULTS: Record<PgKey, string> = { site: "kopialens", page: "", theme: "", device: "desktop", brain: "scripted", scenario: "none", cpu: "0", cutoff: "0", state: "live" };
 const pgStore = (k: PgKey) => `wcb-pg-${k}`;
 
 function readPg(k: PgKey): string {
@@ -257,10 +270,36 @@ function resetVisitor(): void {
   location.reload();
 }
 
+const SCROLL_KEY = "wcb-pg-scroll";
+
+function resetSetup(): void {
+  try {
+    for (const k of PG_KEYS) localStorage.removeItem(pgStore(k));
+  } catch {
+    // nothing stored
+  }
+  location.reload();
+}
+
 function renderPanel(): void {
   const body = document.querySelector("#pg-panel .pg-panel-body")!;
+  let keep = body.scrollTop;
+  try {
+    const saved = sessionStorage.getItem(SCROLL_KEY);
+    if (saved !== null) {
+      keep = Number(saved) || 0;
+      sessionStorage.removeItem(SCROLL_KEY);
+    }
+  } catch {
+    // no saved position
+  }
   const reload = (k: PgKey) => (v: string) => {
     setPg(k, v);
+    try {
+      sessionStorage.setItem(SCROLL_KEY, String(body.scrollTop));
+    } catch {
+      // position not kept
+    }
     location.reload();
   };
   const live = (k: PgKey) => (v: string) => {
@@ -285,17 +324,22 @@ function renderPanel(): void {
     segmented("Brain", [opt("scripted", "Scripted"), opt("real", "Real (Omnara)")], root.dataset.pgBrain ?? "scripted", live("brain"), "Scripted is free and repeatable. Real uses Omnara credits."),
     select("scenario", "Scenario", SCENARIOS, scripted ? (root.dataset.pgScenario ?? "none") : "none", live("scenario"), scripted ? "Forces a failure on the next answer." : "Only with the scripted brain."),
     select("cpu", "CPU test", CPU_TESTS, scripted ? "0" : (root.dataset.pgCpu ?? "0"), live("cpu"), scripted ? "Only with the real brain." : "Burns this much server CPU once per answer, to see what Cloudflare does past its limit. Works only while the server has CPU_TEST=1."),
+    select("cutoff", "Cut-off test", CUTOFF_TESTS, scripted ? "0" : (root.dataset.pgCutoff ?? "0"), live("cutoff"), scripted ? "Only with the real brain." : "Drops the chat on the server partway through the next answer, like a Cloudflare cut-off. The full answer should still arrive."),
     h("p", { class: "pg-group", text: "View" }),
     select("state", "Widget state", STATES, root.dataset.pgState ?? "live", live("state"), "Shows a sample of each state. Normal = the real chat."),
     h("div", { class: "pg-actions" }, [
       h("button", { type: "button", class: "pg-btn", text: "New visitor", title: "Forget this browser's chats and start as a new visitor", onclick: resetVisitor }),
+      h("button", { type: "button", class: "pg-btn", text: "Reset setup", title: "Put every option in this panel back to its default", onclick: resetSetup }),
       h("a", { class: "pg-btn", href: INBOX, target: "_blank", rel: "noopener", text: "Open inbox" }),
     ]),
   );
+  body.scrollTop = keep;
   const scenario = body.querySelector<HTMLSelectElement>("#pg-scenario");
   if (scenario) scenario.disabled = !scripted;
-  const cpu = body.querySelector<HTMLSelectElement>("#pg-cpu");
-  if (cpu) cpu.disabled = scripted;
+  for (const id of ["#pg-cpu", "#pg-cutoff"]) {
+    const el = body.querySelector<HTMLSelectElement>(id);
+    if (el) el.disabled = scripted;
+  }
 }
 
 function renderBanner(): void {
@@ -384,6 +428,8 @@ async function bootWidget(): Promise<void> {
 
 async function main(): Promise<void> {
   applyPg();
+  await loadSiteConfig();
+  DESIGN_ROWS = designRows();
   try {
     loadCss(`${NOTES}/devnotes/design-widget.css`);
     await loadScript(`${NOTES}/devnotes/design-widget.js`);
@@ -413,7 +459,6 @@ async function main(): Promise<void> {
   }
 
   setupPanelToggle();
-  await loadSiteConfig();
   renderPanel();
   renderBanner();
   document.getElementById("pg-links")!.replaceChildren(

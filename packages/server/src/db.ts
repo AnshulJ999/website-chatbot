@@ -149,7 +149,8 @@ export async function listChats(
   db: D1Database,
   q: { site?: string; filter?: "all" | "live" | "wants" | "email"; before?: number; limit?: number },
 ): Promise<ChatSummary[]> {
-  const where: string[] = [];
+  // A chat nobody has written in yet (an opened widget) stays out of the inbox and stats.
+  const where: string[] = ["c.message_count > 0"];
   const args: unknown[] = [];
   if (q.site) {
     where.push(`c.site = ?${args.length + 1}`);
@@ -162,13 +163,13 @@ export async function listChats(
     where.push(`c.updated_at < ?${args.length + 1}`);
     args.push(q.before);
   }
-  const sql = `${SUMMARY_SQL} ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY c.visitor_online DESC, c.updated_at DESC LIMIT ${Math.min(q.limit ?? 50, 200)}`;
+  const sql = `${SUMMARY_SQL} WHERE ${where.join(" AND ")} ORDER BY c.visitor_online DESC, c.updated_at DESC LIMIT ${Math.min(q.limit ?? 50, 200)}`;
   const { results } = await db.prepare(sql).bind(...args).all<ChatRow>();
   return results.map(toSummary);
 }
 
 export async function visitorChats(db: D1Database, visitorId: string): Promise<ChatSummary[]> {
-  const { results } = await db.prepare(`${SUMMARY_SQL} WHERE c.visitor_id = ? ORDER BY c.updated_at DESC LIMIT 20`).bind(visitorId).all<ChatRow>();
+  const { results } = await db.prepare(`${SUMMARY_SQL} WHERE c.visitor_id = ? AND c.message_count > 0 ORDER BY c.updated_at DESC LIMIT 20`).bind(visitorId).all<ChatRow>();
   return results.map(toSummary);
 }
 
@@ -276,7 +277,7 @@ export async function stats(db: D1Database, days = 14) {
   const sinceDay = today(since);
   const [spend, chats, enquiries, thumbs] = await db.batch([
     db.prepare("SELECT day, site, usd, turns FROM spend_daily WHERE day >= ? ORDER BY day").bind(sinceDay),
-    db.prepare("SELECT date(created_at / 1000, 'unixepoch') AS day, site, COUNT(*) AS n, SUM(message_count) AS messages FROM chats WHERE created_at >= ? GROUP BY day, site ORDER BY day").bind(since),
+    db.prepare("SELECT date(created_at / 1000, 'unixepoch') AS day, site, COUNT(*) AS n, SUM(message_count) AS messages FROM chats WHERE created_at >= ? AND message_count > 0 GROUP BY day, site ORDER BY day").bind(since),
     db.prepare("SELECT date(created_at / 1000, 'unixepoch') AS day, site, COUNT(*) AS n FROM enquiries WHERE created_at >= ? GROUP BY day, site ORDER BY day").bind(since),
     db.prepare("SELECT COALESCE(SUM(thumbs_up), 0) AS up, COALESCE(SUM(thumbs_down), 0) AS down FROM chats WHERE created_at >= ?").bind(since),
   ]);

@@ -120,6 +120,7 @@ app.post("/api/session", async (c) => {
       ...rest,
       ownerName: rest.ownerName?.slice(0, 60),
       cpuBurnMs: typeof rest.cpuBurnMs === "number" ? Math.min(5000, Math.max(0, rest.cpuBurnMs)) : undefined,
+      cutoff: rest.cutoff === true || undefined,
     };
   }
   const token = await makeToken(env.TOKEN_SECRET, { chatId, visitorId: vid, site: site.key, exp: Date.now() + 6 * 3600_000, dev });
@@ -134,6 +135,25 @@ app.post("/api/session", async (c) => {
     ownerOnline: await ownerOnline(env, settings),
   };
   return c.json(res);
+});
+
+// The visitor's own earlier chats on this site, for the widget's "Past chats" list.
+app.use("/api/my-chats", cors({ origin: (o) => o, allowMethods: ["POST"], allowHeaders: ["Content-Type"], maxAge: 86400 }));
+app.post("/api/my-chats", async (c) => {
+  let body: { site?: string; visitorId?: string; visitorKey?: string };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "bad_request" }, 400);
+  }
+  const site = await siteFor(c.env, String(body.site ?? ""));
+  if (!site) return c.json({ error: "unknown_site" }, 404);
+  if (!originAllowed(c.env, site, c.req.header("Origin"))) return c.json({ error: "origin" }, 403);
+  const vid = String(body.visitorId ?? "");
+  const known = /^v_[\w]+$/.test(vid) && !!body.visitorKey && (await verifySig(c.env.TOKEN_SECRET, `visitor:${vid}`, body.visitorKey));
+  if (!known) return c.json({ chats: [] });
+  const chats = (await db.visitorChats(c.env.DB, vid)).filter((x) => x.site === site.key).map((x) => ({ id: x.id, preview: x.preview, updatedAt: x.updatedAt }));
+  return c.json({ chats });
 });
 
 app.get("/api/chat/ws", async (c) => {

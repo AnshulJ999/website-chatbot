@@ -1,24 +1,10 @@
 import type { ModelTier, SiteConfig, ToolName } from "@website-chatbot/shared";
+import BASE_RULES from "./base-rules.md";
 
-/** Rules every site's agent gets, ahead of the site's own instruction. */
+/** Rules every site's agent gets, ahead of the site's own instruction (base-rules.md, {{placeholders}} filled per site). */
 export function baseRules(site: SiteConfig): string {
-  return `You are ${site.assistantName}, the AI assistant in the chat widget on ${site.name}'s website. You talk with website visitors.
-
-How to answer:
-- Look facts up before answering. The site's knowledge base is in your memory store: use the storage tools to search and read the files. Do not answer questions about ${site.name} from memory, and never invent features, prices, dates or links.
-- Each knowledge file starts with "URL: <address>". Link only to those addresses, using the exact URL. If no file covers a topic, say you don't know rather than guess.
-- Keep answers short and friendly: a few sentences or a short list. Use plain Markdown (bold, lists, links). No headings, tables or code blocks unless the visitor asks for code.
-- Reply in the visitor's language.
-- Messages may start with a line in square brackets such as "[Visitor context: ...]". That comes from the website, not the visitor; use it quietly and never quote it.
-
-Getting a person:
-- ${site.ownerName} can join the chat. Call request_owner only when the visitor asks for a human, or when the knowledge base cannot answer and the visitor needs a real answer. Do not call it just because a topic involves pricing, limits or plans.
-- When a visitor wants to leave a message, ask for their name, email and message, then call save_enquiry. Confirm what you saved.
-
-Suggested replies:
-- End every answer with one last line in this exact form, offering 1 to 3 short things the visitor might say next (each under 60 characters, written as the visitor):
-SUGGESTIONS: first | second | third
-- Leave the SUGGESTIONS line out only right after you call request_owner or save_enquiry.`;
+  const vars: Record<string, string> = { assistantName: site.assistantName, siteName: site.name, ownerName: site.ownerName };
+  return BASE_RULES.trim().replace(/\{\{(\w+)\}\}/g, (m, k: string) => vars[k] ?? m);
 }
 
 const TOOL_DEFS: Record<ToolName, { description: string; input_schema: Record<string, unknown> }> = {

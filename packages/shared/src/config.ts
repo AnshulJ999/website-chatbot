@@ -83,6 +83,8 @@ export interface WidgetUi {
   suggestions: "chips" | "list";
   talkPlacement: "bar" | "composer" | "menu";
   notice: "welcome" | "under" | "menu";
+  /** Copy and rating buttons under answers: on hover only, or always shown. */
+  actions: "hover" | "always";
 }
 
 export const DEFAULT_UI: WidgetUi = {
@@ -92,6 +94,7 @@ export const DEFAULT_UI: WidgetUi = {
   suggestions: "chips",
   talkPlacement: "bar",
   notice: "welcome",
+  actions: "hover",
 };
 
 /** What the widget may know about a site. */
