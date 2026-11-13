@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+.env
+*.log
+_scratch_*
+packages/server/public/widget/
+packages/server/public/admin/
+devnotes/

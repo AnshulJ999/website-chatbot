@@ -1,0 +1,26 @@
+{
+  "name": "@website-chatbot/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --port 8790 --ip 127.0.0.1",
+    "db:migrate:local": "wrangler d1 migrations apply website-chatbot --local",
+    "db:migrate:remote": "wrangler d1 migrations apply website-chatbot --remote",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@website-chatbot/shared": "*",
+    "hono": "^4.13.18",
+    "postal-mime": "^2.4.0"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.23.0",
+    "@cloudflare/workers-types": "^5.20261113.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.0",
+    "wrangler": "^4.161.0"
+  }
+}

@@ -1,0 +1,74 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: #f7f7f8;
+  --color-panel: #ffffff;
+  --color-fg: #17181c;
+  --color-muted: #f0f1f3;
+  --color-muted-fg: #5d6170;
+  --color-border: #e3e5e9;
+  --color-accent: #0f766e;
+  --color-accent-fg: #ffffff;
+  --color-warn: #b45309;
+  --color-danger: #dc2626;
+  --color-ok: #15803d;
+  --font-sans: "Inter Variable", "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-bg: #0b0d10;
+    --color-panel: #12151a;
+    --color-fg: #eceef2;
+    --color-muted: #1a1e24;
+    --color-muted-fg: #9aa1ad;
+    --color-border: #242932;
+    --color-accent: #2dd4bf;
+    --color-accent-fg: #04201d;
+    --color-warn: #f59e0b;
+    --color-danger: #f87171;
+    --color-ok: #4ade80;
+  }
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+.md p {
+  margin: 0;
+}
+.md p + p,
+.md ul,
+.md ol {
+  margin-top: 6px;
+}
+.md ul,
+.md ol {
+  padding-left: 18px;
+  list-style: revert;
+}
+.md a {
+  color: var(--color-accent);
+  text-decoration: underline;
+}
+.md code {
+  font-family: ui-monospace, monospace;
+  font-size: 0.9em;
+}
+.tabular {
+  font-variant-numeric: tabular-nums;
+}

@@ -1,0 +1,278 @@
+import { newId, type AnalyticsEvent, type ClientMsg, type ServerMsg, type SessionRequest, type SessionResponse } from "@website-chatbot/shared";
+import { flash, live, patch, site } from "./store";
+
+export interface ClientOptions {
+  server: string;
+  siteKey: string;
+  dev?: SessionRequest["dev"];
+}
+
+interface Saved {
+  visitorId?: string;
+  visitorKey?: string;
+  chatId?: string;
+}
+
+const storeKey = (site: string) => `wcb:${site}`;
+
+function load(siteKey: string): Saved {
+  try {
+    return JSON.parse(localStorage.getItem(storeKey(siteKey)) ?? "{}") as Saved;
+  } catch {
+    return {};
+  }
+}
+
+function persist(siteKey: string, s: Saved): void {
+  try {
+    localStorage.setItem(storeKey(siteKey), JSON.stringify(s));
+  } catch {
+    // storage blocked: the chat still works, it just won't resume
+  }
+}
+
+export function emit(event: AnalyticsEvent, props: Record<string, unknown> = {}): void {
+  const detail = { event, site: site.value?.key, ...props };
+  window.dispatchEvent(new CustomEvent("website-chatbot", { detail }));
+  const ph = (window as unknown as { posthog?: { capture?: (e: string, p: object) => void } }).posthog;
+  try {
+    ph?.capture?.(`chatbot_${event}`, detail);
+  } catch {
+    // analytics must never break the chat
+  }
+}
+
+export class ChatClient {
+  private ws?: WebSocket;
+  private session?: SessionResponse;
+  private outbox: ClientMsg[] = [];
+  private retries = 0;
+  private pageTimer?: number;
+  private lastPage = location.href;
+  private previewCtx = "";
+  private closedByUs = false;
+  private starting?: Promise<boolean>;
+
+  constructor(private readonly o: ClientOptions) {}
+
+  /** Dev only: brain and scenario for the next session. */
+  setDev(dev: ClientOptions["dev"]): void {
+    this.o.dev = dev;
+  }
+
+  /** Creates or resumes the session and opens the live connection. */
+  start(newChat = false): Promise<boolean> {
+    if (!newChat && this.ws && this.ws.readyState <= WebSocket.OPEN) return Promise.resolve(true);
+    this.starting ??= this.doStart(newChat).finally(() => (this.starting = undefined));
+    return this.starting;
+  }
+
+  private async doStart(newChat: boolean, turnstileToken?: string): Promise<boolean> {
+    patch({ conn: live.value.conn === "open" ? "reconnecting" : "connecting" });
+    const saved = load(this.o.siteKey);
+    const body: SessionRequest = {
+      site: this.o.siteKey,
+      visitorId: saved.visitorId,
+      visitorKey: saved.visitorKey,
+      chatId: newChat ? undefined : saved.chatId,
+      newChat,
+      turnstileToken,
+      page: { url: location.href, title: document.title, referrer: document.referrer },
+      device: { width: window.innerWidth, touch: matchMedia("(pointer: coarse)").matches, lang: navigator.language, tz: Intl.DateTimeFormat().resolvedOptions().timeZone },
+      dev: this.o.dev,
+    };
+    let res: Response;
+    try {
+      res = await fetch(`${this.o.server}/api/session`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    } catch {
+      patch({ conn: "unreachable" });
+      return false;
+    }
+    if (res.status === 401 && !turnstileToken) {
+      const { siteKey } = (await res.json().catch(() => ({}))) as { siteKey?: string };
+      const token = siteKey ? await turnstile(siteKey) : null;
+      if (token) return this.doStart(newChat, token);
+      patch({ conn: "unreachable" });
+      return false;
+    }
+    if (!res.ok) {
+      patch({ conn: "unreachable" });
+      return false;
+    }
+    this.session = (await res.json()) as SessionResponse;
+    site.value = this.session.site;
+    persist(this.o.siteKey, { visitorId: this.session.visitorId, visitorKey: this.session.visitorKey, chatId: this.session.chatId });
+    if (newChat) patch({ messages: [], preview: "", formDismissed: false });
+    this.connect();
+    return true;
+  }
+
+  private connect(): void {
+    if (!this.session) return;
+    this.closedByUs = true;
+    this.ws?.close();
+    this.closedByUs = false;
+    const q = new URLSearchParams({
+      token: this.session.token,
+      page: location.pathname + location.search,
+      title: document.title,
+      ref: document.referrer,
+      device: `${matchMedia("(pointer: coarse)").matches ? "touch" : "mouse"} · ${window.innerWidth}px`,
+    });
+    const url = `${this.o.server.replace(/^http/, "ws")}${this.session.wsUrl}?${q}`;
+    const ws = new WebSocket(url);
+    this.ws = ws;
+    ws.onopen = () => {
+      this.retries = 0;
+      patch({ conn: "open" });
+      for (const m of this.outbox.splice(0)) ws.send(JSON.stringify(m));
+      this.watchPage();
+    };
+    ws.onmessage = (e) => this.onMessage(String(e.data));
+    ws.onclose = () => {
+      if (this.ws !== ws || this.closedByUs) return;
+      clearInterval(this.pageTimer);
+      const delay = [1000, 2000, 5000, 10000, 20000][Math.min(this.retries++, 4)]!;
+      patch({ conn: this.retries > 4 ? "unreachable" : "reconnecting" });
+      setTimeout(() => {
+        // Tokens expire; a fresh session also covers a server restart.
+        if (this.ws === ws) void this.doStart(false);
+      }, delay);
+    };
+  }
+
+  private onMessage(data: string): void {
+    if (data.charCodeAt(0) === 68 /* "D": a raw Omnara delta frame */) {
+      try {
+        const f = JSON.parse(data.slice(1)) as { model_call_context_id?: string; event?: { kind?: string; delta?: string } };
+        if (f.event?.kind !== "text_delta" || !f.event.delta) return;
+        const ctx = f.model_call_context_id ?? "";
+        const base = ctx === this.previewCtx ? live.value.preview : "";
+        this.previewCtx = ctx;
+        patch({ preview: base + f.event.delta });
+      } catch {
+        // ignore a malformed preview frame
+      }
+      return;
+    }
+    const msg = JSON.parse(data) as ServerMsg;
+    switch (msg.t) {
+      case "history":
+        patch({ messages: msg.messages, status: msg.status, preview: "" });
+        return;
+      case "message": {
+        const list = live.value.messages.filter((m) => m.id !== msg.message.id);
+        list.push(msg.message);
+        list.sort((a, b) => a.seq - b.seq);
+        patch({ messages: list, preview: msg.message.role === "ai" ? "" : live.value.preview });
+        return;
+      }
+      case "update":
+        patch({ messages: live.value.messages.map((m) => (m.id === msg.message.id ? msg.message : m)) });
+        return;
+      case "status":
+        if (msg.status.reason === "owner_away" && live.value.status.reason !== "owner_away") patch({ formDismissed: false });
+        patch({ status: msg.status, ...(msg.status.busy ? {} : { preview: "" }) });
+        return;
+      case "delta_reset":
+        this.previewCtx = "";
+        patch({ preview: "" });
+        return;
+      case "error":
+        flash(msg.text, msg.code.endsWith("_sent") ? "info" : "error");
+        return;
+      default:
+        return;
+    }
+  }
+
+  private send(m: ClientMsg): void {
+    if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(m));
+    else {
+      this.outbox.push(m);
+      void this.start();
+    }
+  }
+
+  say(text: string): void {
+    const id = newId("m");
+    const first = !live.value.messages.some((m) => m.role === "visitor");
+    patch({
+      messages: [...live.value.messages, { id, seq: Number.MAX_SAFE_INTEGER, role: "visitor", text, at: Date.now() }],
+      status: { ...live.value.status, busy: live.value.status.mode === "ai" },
+    });
+    this.send({ t: "send", id, text });
+    if (first) emit("first_message");
+  }
+
+  talkToOwner(): void {
+    this.send({ t: "talk_to_owner" });
+    emit("talked_to_owner");
+  }
+
+  feedback(msgId: string, value: 1 | -1 | 0): void {
+    patch({ messages: live.value.messages.map((m) => (m.id === msgId ? { ...m, feedback: value === 0 ? undefined : value } : m)) });
+    this.send({ t: "feedback", msgId, value });
+  }
+
+  contact(name: string, email: string, message: string): void {
+    this.send({ t: "contact", name, email, message });
+    emit("enquiry_sent");
+  }
+
+  emailTranscript(email: string): void {
+    this.send({ t: "email_transcript", email });
+  }
+
+  newChat(): Promise<boolean> {
+    return this.start(true);
+  }
+
+  private watchPage(): void {
+    clearInterval(this.pageTimer);
+    // Single-page sites change URL without reloading; a cheap poll catches it.
+    this.pageTimer = window.setInterval(() => {
+      if (location.href === this.lastPage) return;
+      this.lastPage = location.href;
+      this.send({ t: "page", url: location.pathname + location.search, title: document.title });
+    }, 1500);
+  }
+}
+
+let turnstileLoading: Promise<void> | undefined;
+
+/** Runs a Turnstile check in a small light-DOM box (Turnstile can't render inside a shadow root). */
+async function turnstile(siteKey: string): Promise<string | null> {
+  type TS = { render: (el: HTMLElement, o: Record<string, unknown>) => string; remove: (id: string) => void };
+  const w = window as unknown as { turnstile?: TS };
+  turnstileLoading ??= new Promise<void>((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
+    s.async = true;
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error("turnstile"));
+    document.head.appendChild(s);
+  });
+  try {
+    await turnstileLoading;
+  } catch {
+    return null;
+  }
+  const box = document.createElement("div");
+  box.style.cssText = "position:fixed;bottom:96px;right:24px;z-index:2147483647";
+  document.body.appendChild(box);
+  return new Promise((resolve) => {
+    const id = w.turnstile!.render(box, {
+      sitekey: siteKey,
+      appearance: "interaction-only",
+      callback: (token: string) => done(token),
+      "error-callback": () => done(null),
+      "expired-callback": () => done(null),
+    });
+    const done = (token: string | null) => {
+      w.turnstile?.remove(id);
+      box.remove();
+      resolve(token);
+    };
+  });
+}

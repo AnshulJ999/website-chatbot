@@ -1,0 +1,14 @@
+# Copy to .dev.vars for local development (git-ignored).
+DEV_MODE=1
+OMNARA_ORG_ID=
+OMNARA_PROJECT_ID=
+OMNARA_API_KEY=
+TOKEN_SECRET=change-me-to-a-long-random-string
+API_TOKEN=change-me
+PUBLIC_URL=http://127.0.0.1:8790
+# Optional locally:
+# RESEND_API_KEY=
+# NTFY_URL=https://ntfy.sh/your-topic
+# NTFY_TOKEN=
+# TURNSTILE_SECRET=
+# GITHUB_TOKEN=

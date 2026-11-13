@@ -1,0 +1,13 @@
+{
+  "name": "@website-chatbot/kb-sync",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": { "kb-sync": "./sync.ts" },
+  "scripts": {
+    "start": "node sync.ts"
+  },
+  "engines": {
+    "node": ">=23.6"
+  }
+}

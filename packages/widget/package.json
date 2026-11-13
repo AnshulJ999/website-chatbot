@@ -1,0 +1,21 @@
+{
+  "name": "@website-chatbot/widget",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --port 5290 --strictPort --host 127.0.0.1",
+    "build": "vite build",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@preact/signals": "^2.11.4",
+    "@website-chatbot/shared": "*",
+    "preact": "^11.2.0"
+  },
+  "devDependencies": {
+    "@preact/preset-vite": "^2.10.6",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8"
+  }
+}

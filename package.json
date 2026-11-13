@@ -1,0 +1,22 @@
+{
+  "name": "website-chatbot",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "tools/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w @website-chatbot/server",
+    "dev:widget": "npm run dev -w @website-chatbot/widget",
+    "dev:inbox": "npm run dev -w @website-chatbot/inbox",
+    "build": "npm run build -w @website-chatbot/widget && npm run build -w @website-chatbot/inbox",
+    "deploy": "npm run build && npm run deploy -w @website-chatbot/server",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "kb-sync": "npm run start -w @website-chatbot/kb-sync --"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

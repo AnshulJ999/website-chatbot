@@ -1,0 +1,174 @@
+/* Theme tokens copied from the real sites, so the widget is judged against real colours.
+   kopialens-website: src/styles.css (@theme + [data-theme="light"]).
+   website-portfolio: app/globals.css (shadcn HSL triplets per theme class). */
+
+.kl-dark {
+  --color-background: #0a100f;
+  --color-background-raised: #0e1615;
+  --color-foreground: #f1f5f4;
+  --color-muted: #152120;
+  --color-muted-foreground: #9aa8a5;
+  --color-card: #101918;
+  --color-border: #1e2c2a;
+  --color-primary: #2dd4bf;
+  --color-primary-foreground: #04201d;
+  --font-sans: "Geist", ui-sans-serif, system-ui, sans-serif;
+  --page-bg: var(--color-background);
+  --page-fg: var(--color-foreground);
+  --page-muted: var(--color-muted-foreground);
+  --page-accent: var(--color-primary);
+}
+.kl-light {
+  --color-background: #f8faf9;
+  --color-background-raised: #ffffff;
+  --color-foreground: #0f1917;
+  --color-muted: #edf2f1;
+  --color-muted-foreground: #4a5956;
+  --color-card: #ffffff;
+  --color-border: #dfe6e4;
+  --color-primary: #0f766e;
+  --color-primary-foreground: #ffffff;
+  --font-sans: "Geist", ui-sans-serif, system-ui, sans-serif;
+  --page-bg: var(--color-background);
+  --page-fg: var(--color-foreground);
+  --page-muted: var(--color-muted-foreground);
+  --page-accent: var(--color-primary);
+}
+
+.pf-light,
+.pf-dark,
+.pf-retro,
+.pf-cyberpunk,
+.pf-aurora,
+.pf-synthwave,
+.pf-paper {
+  --page-bg: hsl(var(--background));
+  --page-fg: hsl(var(--foreground));
+  --page-muted: hsl(var(--muted-foreground));
+  --page-accent: hsl(var(--primary));
+}
+.pf-light {
+  --background: 0 0% 99.5%;
+  --foreground: 0 0% 9%;
+  --muted: 39 46% 98.7%;
+  --muted-foreground: 0 0% 45.1%;
+  --border: 0 0% 94%;
+  --card: 0 0% 100%;
+  --primary: 0 0% 9%;
+  --primary-foreground: 0 0% 98%;
+  --radius: 0.5rem;
+}
+.pf-dark {
+  --background: 20 14% 11%;
+  --foreground: 24 10% 91%;
+  --muted: 20 10% 17%;
+  --muted-foreground: 24 5% 57%;
+  --border: 20 10% 20%;
+  --card: 20 14% 11%;
+  --primary: 24 10% 91%;
+  --primary-foreground: 20 14% 9%;
+  --radius: 0.5rem;
+}
+.pf-retro {
+  --background: 39 70% 90%;
+  --foreground: 20 80% 20%;
+  --muted: 30 40% 85%;
+  --muted-foreground: 20 40% 30%;
+  --border: 20 40% 70%;
+  --card: 39 60% 85%;
+  --primary: 20 80% 50%;
+  --primary-foreground: 39 100% 97%;
+  --radius: 0.125rem;
+}
+.pf-cyberpunk {
+  --background: 235 85% 8%;
+  --foreground: 180 100% 75%;
+  --muted: 235 70% 15%;
+  --muted-foreground: 180 70% 55%;
+  --border: 326 100% 60%;
+  --card: 235 80% 12%;
+  --primary: 326 100% 60%;
+  --primary-foreground: 235 100% 98%;
+  --radius: 0.125rem;
+}
+.pf-aurora {
+  --background: 220 40% 10%;
+  --foreground: 160 100% 90%;
+  --muted: 220 30% 20%;
+  --muted-foreground: 160 70% 70%;
+  --border: 280 80% 60%;
+  --card: 220 35% 15%;
+  --primary: 160 100% 50%;
+  --primary-foreground: 220 40% 10%;
+  --radius: 1rem;
+}
+.pf-synthwave {
+  --background: 260 15% 10%;
+  --foreground: 330 100% 90%;
+  --muted: 260 20% 20%;
+  --muted-foreground: 330 70% 70%;
+  --border: 300 100% 60%;
+  --card: 260 15% 15%;
+  --primary: 300 100% 60%;
+  --primary-foreground: 260 15% 10%;
+  --radius: 0.5rem;
+}
+.pf-paper {
+  --background: 40 30% 95%;
+  --foreground: 25 50% 20%;
+  --muted: 30 20% 90%;
+  --muted-foreground: 25 30% 40%;
+  --border: 25 30% 80%;
+  --card: 35 25% 92%;
+  --primary: 25 95% 40%;
+  --primary-foreground: 40 30% 98%;
+  --radius: 0.25rem;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+  background: var(--page-bg);
+  color: var(--page-fg);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+.pg {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 48px 16px;
+}
+.pg h1 {
+  font-size: 22px;
+  margin: 0 0 12px;
+}
+.pg p {
+  color: var(--page-muted);
+  line-height: 1.6;
+}
+.pg a {
+  color: var(--page-accent);
+}
+.pg-swatches {
+  display: flex;
+  gap: 8px;
+  margin-top: 24px;
+}
+.pg-swatches span {
+  width: 40px;
+  height: 24px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--page-fg) 15%, transparent);
+}
+.pg-swatches span:nth-child(1) {
+  background: var(--page-bg);
+}
+.pg-swatches span:nth-child(2) {
+  background: var(--page-fg);
+}
+.pg-swatches span:nth-child(3) {
+  background: var(--page-muted);
+}
+.pg-swatches span:nth-child(4) {
+  background: var(--page-accent);
+}
