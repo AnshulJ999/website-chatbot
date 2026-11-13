@@ -3,50 +3,64 @@ import { isEmail, renderMarkdown, startersFor, visiblePreview, type ChatMessage,
 import { emit, type ChatClient } from "./client";
 import { Icon } from "./icons";
 
-import { forced, live, notice, patch, site, ui, type View } from "./store";
+import { forced, live, notice, setView, site, ui, type View } from "./store";
 
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+const CLOSE_MS = 180;
 
 export function App({ client }: { client: ChatClient }) {
+  const [closing, setClosing] = useState(false);
   const s = site.value;
   const v = forced.value ?? live.value;
   const u = ui.value;
   if (!s) return null;
 
   const open = () => {
-    patch({ open: true, bubble: false });
+    setView({ open: true, bubble: false });
     emit("opened");
     void client.start();
   };
-  const close = () => patch({ open: false, menu: false });
+  // The panel plays its closing animation before it unmounts.
+  const close = () => {
+    if (closing) return;
+    if (matchMedia("(prefers-reduced-motion: reduce)").matches) return setView({ open: false, menu: false });
+    setClosing(true);
+    setTimeout(() => {
+      setView({ open: false, menu: false });
+      setClosing(false);
+    }, CLOSE_MS);
+  };
+  const isOpen = v.open && !closing;
 
   return (
-    <div class={`root corner-${u.corner}`}>
-      {v.open ? (
-        <Panel client={client} site={s} v={v} onClose={close} />
-      ) : (
-        <>
-          {v.bubble && s.proactive.text && (
-            <div class="bubble" role="status">
-              <button class="bubble-text" onClick={open}>
-                {s.proactive.text}
-              </button>
-              <button class="icon-btn small" aria-label="Dismiss" onClick={() => patch({ bubble: false })}>
-                <Icon name="x" />
-              </button>
-            </div>
-          )}
-          <button class={`launcher launcher-${u.launcher}`} aria-label={`Open ${s.assistantName}`} onClick={open}>
-            <Icon name="chat" />
-            {u.launcher === "pill" && <span>{s.assistantName}</span>}
+    <div class={`root corner-${u.corner} ${v.open ? "is-open" : ""}`}>
+      {v.open && <Panel client={client} site={s} v={v} closing={closing} onClose={close} />}
+      {!v.open && v.bubble && s.proactive.text && (
+        <div class="bubble" role="status">
+          <button class="bubble-text" onClick={open}>
+            {s.proactive.text}
           </button>
-        </>
+          <button class="icon-btn small" aria-label="Dismiss" onClick={() => setView({ bubble: false })}>
+            <Icon name="x" />
+          </button>
+        </div>
       )}
+      <button
+        class={`launcher launcher-${u.launcher} ${isOpen ? "open" : ""}`}
+        aria-label={isOpen ? `Close ${s.assistantName}` : `Open ${s.assistantName}`}
+        aria-expanded={isOpen}
+        onClick={isOpen ? close : open}
+      >
+        <span class="launcher-icon" key={isOpen ? "x" : "chat"}>
+          <Icon name={isOpen ? "x" : "chat"} />
+        </span>
+        {u.launcher === "pill" && !isOpen && <span>{s.assistantName}</span>}
+      </button>
     </div>
   );
 }
 
-function Panel({ client, site: s, v, onClose }: { client: ChatClient; site: PublicSiteConfig; v: View; onClose: () => void }) {
+function Panel({ client, site: s, v, closing, onClose }: { client: ChatClient; site: PublicSiteConfig; v: View; closing: boolean; onClose: () => void }) {
   const u = ui.value;
   const st = v.status;
   const panelRef = useRef<HTMLDivElement>(null);
@@ -55,7 +69,7 @@ function Panel({ client, site: s, v, onClose }: { client: ChatClient; site: Publ
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      if (live.value.menu) patch({ menu: false });
+      if ((forced.value ?? live.value).menu) setView({ menu: false });
       else onClose();
     };
     window.addEventListener("keydown", onKey);
@@ -68,7 +82,7 @@ function Panel({ client, site: s, v, onClose }: { client: ChatClient; site: Publ
   const talkVisible = st.mode === "ai" && !st.ownerJoined;
 
   return (
-    <div class={`panel panel-${u.panel}`} ref={panelRef} style={width ? { width: `${width}px` } : undefined} role="dialog" aria-label={s.assistantName}>
+    <div class={`panel panel-${u.panel} ${closing ? "closing" : ""}`} ref={panelRef} style={width ? { width: `${width}px` } : undefined} role="dialog" aria-label={s.assistantName}>
       <ResizeHandle panel={panelRef} />
       <header class="head">
         <div class="head-title">
@@ -86,7 +100,7 @@ function Panel({ client, site: s, v, onClose }: { client: ChatClient; site: Publ
             )}
           </span>
         </div>
-        <button class="icon-btn" aria-label="Chat options" aria-expanded={v.menu} onClick={() => patch({ menu: !live.value.menu })}>
+        <button class="icon-btn" aria-label="Chat options" aria-expanded={v.menu} onClick={() => setView({ menu: !v.menu })}>
           <Icon name="dots" />
         </button>
         <button class="icon-btn" aria-label="Close chat" onClick={onClose}>
@@ -151,7 +165,7 @@ function Menu({ client, site: s, v }: { client: ChatClient; site: PublicSiteConf
   const [emailing, setEmailing] = useState(false);
   const [email, setEmail] = useState(v.status.visitorEmail ?? "");
   const u = ui.value;
-  const close = () => patch({ menu: false });
+  const close = () => setView({ menu: false });
   return (
     <div class="menu" role="menu">
       <button role="menuitem" onClick={() => (close(), void client.newChat())}>
@@ -387,7 +401,7 @@ function GetInTouch({ client, site: s, reason, v }: { client: ChatClient; site: 
           {sending ? "Sending…" : "Send message"}
         </button>
         {reason === "owner_away" && (
-          <button type="button" class="link-btn" onClick={() => patch({ formDismissed: true })}>
+          <button type="button" class="link-btn" onClick={() => setView({ formDismissed: true })}>
             Back to chat
           </button>
         )}

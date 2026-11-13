@@ -45,8 +45,16 @@ export function patch(p: Partial<View>): void {
   live.value = { ...live.value, ...p };
 }
 
+/** UI-only changes (open, menu…): they apply to the Design menu's sample view when one is shown, so it stays clickable. */
+export function setView(p: Partial<Pick<View, "open" | "bubble" | "menu" | "formDismissed">>): void {
+  if (forced.value) forced.value = { ...forced.value, ...p };
+  else patch(p);
+}
+
 // Hot-swapping this module would orphan the live signals; reload the page instead.
-import.meta.hot?.decline();
+import.meta.hot?.on("vite:beforeUpdate", (p: { updates: { path: string }[] }) => {
+  if (p.updates.some((u) => u.path.endsWith("/store.ts"))) location.reload();
+});
 
 export function flash(text: string, tone: "info" | "error" = "info"): void {
   notice.value = { text, tone };

@@ -93,6 +93,20 @@ a {
   width: 24px;
   height: 24px;
 }
+.launcher-icon {
+  display: inline-grid;
+  animation: spin-in 0.22s ease;
+}
+.launcher.open {
+  width: 56px;
+  padding: 0;
+}
+@keyframes spin-in {
+  from {
+    opacity: 0;
+    transform: rotate(-90deg) scale(0.6);
+  }
+}
 .launcher-pill {
   padding: 0 20px 0 16px;
   font-weight: 600;
@@ -119,17 +133,34 @@ a {
   display: flex;
   flex-direction: column;
   width: 380px;
-  height: min(600px, calc(100vh - 40px));
+  /* Room for the launcher below the panel. */
+  height: min(600px, calc(100vh - 106px));
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
   overflow: hidden;
+  transform-origin: bottom right;
   animation: rise 0.2s ease;
+}
+.corner-left .panel {
+  transform-origin: bottom left;
+}
+.panel.closing {
+  animation: fall 0.18s ease forwards;
+}
+@keyframes fall {
+  to {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
 }
 .panel-tall {
   width: 420px;
-  height: calc(100vh - 40px);
+  height: calc(100vh - 106px);
+}
+.panel-sheet ~ .launcher {
+  display: none;
 }
 .panel-sheet {
   position: fixed;
@@ -150,13 +181,15 @@ a {
 @keyframes rise {
   from {
     opacity: 0;
-    transform: translateY(8px);
+    transform: translateY(8px) scale(0.98);
   }
 }
 @media (prefers-reduced-motion: reduce) {
   .panel,
+  .panel.closing,
   .bubble,
-  .launcher {
+  .launcher,
+  .launcher-icon {
     animation: none;
     transition: none;
   }
@@ -639,6 +672,10 @@ textarea {
     border: 0;
   }
   .resize {
+    display: none;
+  }
+  /* The full-screen panel has its own close button. */
+  .is-open .launcher {
     display: none;
   }
   .icon-btn {
