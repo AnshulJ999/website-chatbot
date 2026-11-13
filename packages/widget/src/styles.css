@@ -227,6 +227,15 @@ a {
 .corner-left .resize {
   right: -4px;
 }
+.resize-top {
+  position: absolute;
+  top: -4px;
+  left: 12px;
+  right: 12px;
+  height: 8px;
+  cursor: ns-resize;
+  z-index: 2;
+}
 .resize-corner {
   position: absolute;
   top: -4px;
@@ -771,6 +780,7 @@ textarea {
     border: 0;
   }
   .resize,
+  .resize-top,
   .resize-corner,
   .expand-btn {
     display: none;
@@ -786,6 +796,7 @@ textarea {
 }
 @media (pointer: coarse) {
   .resize,
+  .resize-top,
   .resize-corner {
     display: none;
   }

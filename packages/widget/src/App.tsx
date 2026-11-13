@@ -67,7 +67,8 @@ function Panel({ client, site: s, v, closing, onClose }: { client: ChatClient; s
   const size = useResize(panelRef);
   const [expanded, setExpanded] = useExpanded();
   const sheet = expanded || u.panel === "sheet";
-  const sizeStyle = sheet ? undefined : { ...(size.w ? { width: `${size.w}px` } : {}), ...(size.h ? { height: `${size.h}px` } : {}) };
+  // The side sheet keeps the visitor's width; its height is the whole window.
+  const sizeStyle = { ...(size.w ? { width: `${size.w}px` } : {}), ...(!sheet && size.h ? { height: `${size.h}px` } : {}) };
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -86,7 +87,8 @@ function Panel({ client, site: s, v, closing, onClose }: { client: ChatClient; s
 
   return (
     <div class={`panel panel-${sheet ? "sheet" : u.panel} ${closing ? "closing" : ""}`} ref={panelRef} style={sizeStyle} role="dialog" aria-label={s.assistantName}>
-      {!sheet && <ResizeHandle panel={panelRef} axis="x" />}
+      <ResizeHandle panel={panelRef} axis="x" />
+      {!sheet && <ResizeHandle panel={panelRef} axis="y" />}
       {!sheet && <ResizeHandle panel={panelRef} axis="xy" />}
       <header class="head">
         <div class="head-title">
@@ -612,8 +614,14 @@ function useExpanded(): [boolean, (v: boolean) => void] {
   return [expanded, update];
 }
 
-/** Drag handles: the inner edge sets the width, the top inner corner sets width and height (desktop only). */
-function ResizeHandle({ panel, axis }: { panel: { current: HTMLDivElement | null }; axis: "x" | "xy" }) {
+const HANDLE: Record<"x" | "y" | "xy", { cls: string; title: string }> = {
+  x: { cls: "resize", title: "Drag to change the width" },
+  y: { cls: "resize-top", title: "Drag to change the height" },
+  xy: { cls: "resize-corner", title: "Drag to change the size" },
+};
+
+/** Drag handles (desktop only): inner edge = width, top edge = height, top inner corner = both. */
+function ResizeHandle({ panel, axis }: { panel: { current: HTMLDivElement | null }; axis: "x" | "y" | "xy" }) {
   const MIN_W = 340;
   const MAX_W = 720;
   const MIN_H = 360;
@@ -629,18 +637,18 @@ function ResizeHandle({ panel, axis }: { panel: { current: HTMLDivElement | null
     const maxH = Math.max(MIN_H, r.bottom - 8);
     const move = (ev: PointerEvent) => {
       const dx = fromRight ? startX - ev.clientX : ev.clientX - startX;
-      el.style.width = `${Math.max(MIN_W, Math.min(MAX_W, r.width + dx))}px`;
-      if (axis === "xy") el.style.height = `${Math.max(MIN_H, Math.min(maxH, r.height + startY - ev.clientY))}px`;
+      if (axis !== "y") el.style.width = `${Math.max(MIN_W, Math.min(MAX_W, r.width + dx))}px`;
+      if (axis !== "x") el.style.height = `${Math.max(MIN_H, Math.min(maxH, r.height + startY - ev.clientY))}px`;
     };
     const up = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
       const now = el.getBoundingClientRect();
       const prev = readSize();
-      el.dispatchEvent(new CustomEvent("wcb-resize", { detail: { w: now.width, h: axis === "xy" ? now.height : prev.h } satisfies Size }));
+      el.dispatchEvent(new CustomEvent("wcb-resize", { detail: { w: axis === "y" ? prev.w : now.width, h: axis === "x" ? prev.h : now.height } satisfies Size }));
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
   };
-  return <div class={axis === "x" ? "resize" : "resize-corner"} onPointerDown={onDown} aria-hidden="true" title={axis === "x" ? "Drag to change the width" : "Drag to change the size"} />;
+  return <div class={HANDLE[axis].cls} onPointerDown={onDown} aria-hidden="true" title={HANDLE[axis].title} />;
 }
