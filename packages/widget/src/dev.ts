@@ -54,6 +54,7 @@ export function initDev(_host: HTMLElement, opts: WidgetOptions, client: ChatCli
     const dev = {
       brain: (d.pgBrain ?? "scripted") as "real" | "scripted",
       scenario: d.pgScenario ?? "none",
+      ...(d.pgBrain === "real" && Number(d.pgCpu) > 0 ? { cpuBurnMs: Number(d.pgCpu) } : {}),
       ...(ownerName ? { ownerName } : {}),
     };
     const key = JSON.stringify(dev);

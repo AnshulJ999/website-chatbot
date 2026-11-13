@@ -285,7 +285,7 @@ export async function stats(db: D1Database, days = 14) {
 
 // Incidents: a durable log of failures, for alerts and later investigation.
 
-export type IncidentKind = "attempt_failed" | "turn_failed" | "alert_failed" | "mail_failed";
+export type IncidentKind = "attempt_failed" | "turn_failed" | "turn_interrupted" | "alert_failed" | "mail_failed";
 
 export async function logIncident(db: D1Database, i: { site: string; chatId?: string; kind: IncidentKind; model?: string; detail: string }): Promise<void> {
   await db

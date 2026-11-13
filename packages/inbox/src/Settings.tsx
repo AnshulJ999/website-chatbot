@@ -100,7 +100,8 @@ export function Settings({ overview, onSave }: { overview: Overview; onSave: (p:
         </Card>
 
         <Card title="Behaviour">
-          <Toggle label="Stream answers word by word" hint="Off: each answer appears when it's finished" checked={draft.streaming} onChange={(v) => set("streaming", v)} />
+          <Toggle label="Stream answers word by word" hint="Off: each answer appears when it's finished. A chat whose answer was cut off stops streaming on its own." checked={draft.streaming} onChange={(v) => set("streaming", v)} />
+          <Num label="Send streamed words in batches every (ms, 0 = each piece at once)" value={draft.deltaBatchMs} step={10} onChange={(v) => set("deltaBatchMs", v)} />
           <Toggle label="Alert me about every new chat" hint="Off: alerts only for messages and requests for you" checked={draft.alertOnNewChat} onChange={(v) => set("alertOnNewChat", v)} />
         </Card>
       </div>

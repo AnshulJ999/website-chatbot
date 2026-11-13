@@ -39,8 +39,20 @@ export class OmnaraBrain implements Brain {
     }
     await cb.saveState();
     cb.touch();
+    return this.follow(state, req, cb, false);
+  }
 
-    const agentId = state.agentId;
+  async resume(state: BrainState, req: TurnRequest, cb: TurnCallbacks): Promise<TurnResult> {
+    if (!state.agentId) throw new BrainFailure("error", "no agent to resume");
+    return this.follow(state, req, cb, true);
+  }
+
+  /**
+   * Reads the agent's events until the turn ends. When resuming, events replay from the last saved
+   * place, so tool calls are taken from Omnara's list of open calls rather than from replayed frames.
+   */
+  private async follow(state: BrainState, req: TurnRequest, cb: TurnCallbacks, resuming: boolean): Promise<TurnResult> {
+    const agentId = state.agentId!;
     const handled = new Set<string>();
     const tools: Promise<void>[] = [];
     const runTool = (id: string, name: string, input: Record<string, unknown> | undefined) => {
@@ -57,7 +69,8 @@ export class OmnaraBrain implements Brain {
       );
     };
 
-    let sawInput = false;
+    // Replay starts after the previous turn's end, so a resumed turn already has its input.
+    let sawInput = resuming;
     let reconnects = 0;
     for (;;) {
       if (req.signal.aborted) throw new BrainFailure("stall", "turn timed out");
@@ -74,7 +87,9 @@ export class OmnaraBrain implements Brain {
           }
           if (f.event === "tool_call_update") {
             const u = JSON.parse(f.data) as { tool_call_id: string; agent_id: string; state: string; name?: string; input?: Record<string, unknown> };
-            if (u.state === "ready" && u.name && u.agent_id === agentId) runTool(u.tool_call_id, u.name, u.input);
+            if (u.state !== "ready" || !u.name || u.agent_id !== agentId) continue;
+            if (resuming) for (const c of await this.api.readyToolCalls(agentId)) runTool(c.id, c.name, c.input);
+            else runTool(u.tool_call_id, u.name, u.input);
             continue;
           }
           if (f.event === "error") {

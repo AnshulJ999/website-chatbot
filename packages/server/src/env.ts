@@ -19,6 +19,8 @@ export interface Env {
   REPLY_DOMAIN: string;
   /** "1" when OMNARA_API_KEY is a project API key: visitor messages then carry an Omnara actor. */
   OMNARA_ACTOR?: string;
+  /** "1" lets the owner's Playground CPU test burn CPU on purpose; leave unset normally. */
+  CPU_TEST?: string;
   /** "1" locally: skips Access and Turnstile, allows the scripted brain. */
   DEV_MODE: string;
 

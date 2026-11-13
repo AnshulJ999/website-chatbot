@@ -83,6 +83,8 @@ export interface DevOptions {
   brain?: "real" | "scripted";
   scenario?: string;
   ownerName?: string;
+  /** CPU test: burn about this much server CPU once per answer. Only acts when the server has CPU_TEST=1. */
+  cpuBurnMs?: number;
   /** Owner pass from /admin/api/dev-pass; lets the hosted Playground use these options. */
   pass?: string;
 }

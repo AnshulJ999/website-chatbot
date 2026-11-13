@@ -7,6 +7,12 @@ export interface ClientOptions {
   dev?: SessionRequest["dev"];
 }
 
+/** One streamed piece of an answer, as Omnara sends it. */
+interface DeltaFrame {
+  model_call_context_id?: string;
+  event?: { kind?: string; delta?: string };
+}
+
 interface Saved {
   visitorId?: string;
   visitorKey?: string;
@@ -142,14 +148,19 @@ export class ChatClient {
   }
 
   private onMessage(data: string): void {
-    if (data.charCodeAt(0) === 68 /* "D": a raw Omnara delta frame */) {
+    const head = data.charCodeAt(0);
+    if (head === 68 /* "D": one raw Omnara delta frame */ || head === 66 /* "B": a JSON array of them */) {
       try {
-        const f = JSON.parse(data.slice(1)) as { model_call_context_id?: string; event?: { kind?: string; delta?: string } };
-        if (f.event?.kind !== "text_delta" || !f.event.delta) return;
-        const ctx = f.model_call_context_id ?? "";
-        const base = ctx === this.previewCtx ? live.value.preview : "";
-        this.previewCtx = ctx;
-        patch({ preview: base + f.event.delta });
+        const frames = (head === 68 ? [JSON.parse(data.slice(1))] : JSON.parse(data.slice(1))) as DeltaFrame[];
+        let preview = live.value.preview;
+        for (const f of frames) {
+          if (f.event?.kind !== "text_delta" || !f.event.delta) continue;
+          const ctx = f.model_call_context_id ?? "";
+          if (ctx !== this.previewCtx) preview = "";
+          this.previewCtx = ctx;
+          preview += f.event.delta;
+        }
+        if (preview !== live.value.preview) patch({ preview });
       } catch {
         // ignore a malformed preview frame
       }

@@ -48,6 +48,8 @@ export interface TurnResult {
 
 export interface Brain {
   turn(state: BrainState, req: TurnRequest, cb: TurnCallbacks): Promise<TurnResult>;
+  /** Finishes a turn already sent (e.g. after the server was cut off mid-answer); req.text is not sent again. */
+  resume?(state: BrainState, req: TurnRequest, cb: TurnCallbacks): Promise<TurnResult>;
   /** Stops any work in progress; safe to call when idle. */
   cancel(state: BrainState): Promise<void>;
   archive(state: BrainState): Promise<void>;

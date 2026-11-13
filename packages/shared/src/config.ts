@@ -15,6 +15,8 @@ export interface Settings {
   ownerOnline: boolean;
   /** true = real word-by-word deltas from Omnara; false = finished answers only. */
   streaming: boolean;
+  /** Streaming only: send the words in one message per this many ms; 0 sends each piece as it arrives. */
+  deltaBatchMs: number;
   ladder: ModelTier[];
   chatCapUsd: number;
   capAction: LimitAction;
@@ -34,6 +36,7 @@ export const DEFAULT_SETTINGS: Settings = {
   aiEnabled: true,
   ownerOnline: false,
   streaming: true,
+  deltaBatchMs: 0,
   ladder: [
     { provider: "omnara-openrouter", model: "deepseek/deepseek-v4.1-flash-latest", label: "DeepSeek V4.1 Flash", free: false, enabled: true },
     { provider: "omnara-openrouter", model: "openai/gpt-6-luna", label: "GPT-6 Luna", free: false, enabled: true },

@@ -66,6 +66,7 @@ const STATES = [
   opt("menu", "Menu open"),
 ];
 const SCENARIOS = [opt("none", "Normal"), opt("fail_first", "First model fails"), opt("slow", "Reply stalls"), opt("omnara_down", "Omnara down"), opt("cap", "Chat over its cap")];
+const CPU_TESTS = [opt("0", "Off"), opt("50", "About 50 ms"), opt("200", "About 200 ms"), opt("1000", "About 1 s")];
 
 // Look choices only: the test setup lives in the panel.
 const DESIGN_ROWS = [
@@ -109,9 +110,9 @@ const root = document.documentElement;
 
 // ---- Test setup (panel) state ----
 
-const PG_KEYS = ["site", "page", "theme", "device", "brain", "scenario", "state"] as const;
+const PG_KEYS = ["site", "page", "theme", "device", "brain", "scenario", "cpu", "state"] as const;
 type PgKey = (typeof PG_KEYS)[number];
-const PG_DEFAULTS: Record<PgKey, string> = { site: "kopialens", page: "", theme: "", device: "desktop", brain: "scripted", scenario: "none", state: "live" };
+const PG_DEFAULTS: Record<PgKey, string> = { site: "kopialens", page: "", theme: "", device: "desktop", brain: "scripted", scenario: "none", cpu: "0", state: "live" };
 const pgStore = (k: PgKey) => `wcb-pg-${k}`;
 
 function readPg(k: PgKey): string {
@@ -283,6 +284,7 @@ function renderPanel(): void {
     h("p", { class: "pg-group", text: "Answers" }),
     segmented("Brain", [opt("scripted", "Scripted"), opt("real", "Real (Omnara)")], root.dataset.pgBrain ?? "scripted", live("brain"), "Scripted is free and repeatable. Real uses Omnara credits."),
     select("scenario", "Scenario", SCENARIOS, scripted ? (root.dataset.pgScenario ?? "none") : "none", live("scenario"), scripted ? "Forces a failure on the next answer." : "Only with the scripted brain."),
+    select("cpu", "CPU test", CPU_TESTS, scripted ? "0" : (root.dataset.pgCpu ?? "0"), live("cpu"), scripted ? "Only with the real brain." : "Burns this much server CPU once per answer, to see what Cloudflare does past its limit. Works only while the server has CPU_TEST=1."),
     h("p", { class: "pg-group", text: "View" }),
     select("state", "Widget state", STATES, root.dataset.pgState ?? "live", live("state"), "Shows a sample of each state. Normal = the real chat."),
     h("div", { class: "pg-actions" }, [
@@ -292,6 +294,8 @@ function renderPanel(): void {
   );
   const scenario = body.querySelector<HTMLSelectElement>("#pg-scenario");
   if (scenario) scenario.disabled = !scripted;
+  const cpu = body.querySelector<HTMLSelectElement>("#pg-cpu");
+  if (cpu) cpu.disabled = scripted;
 }
 
 function renderBanner(): void {

@@ -116,7 +116,11 @@ app.post("/api/session", async (c) => {
   let dev: SessionRequest["dev"];
   if (devOk && body.dev) {
     const { pass: _pass, ...rest } = body.dev;
-    dev = { ...rest, ownerName: rest.ownerName?.slice(0, 60) };
+    dev = {
+      ...rest,
+      ownerName: rest.ownerName?.slice(0, 60),
+      cpuBurnMs: typeof rest.cpuBurnMs === "number" ? Math.min(5000, Math.max(0, rest.cpuBurnMs)) : undefined,
+    };
   }
   const token = await makeToken(env.TOKEN_SECRET, { chatId, visitorId: vid, site: site.key, exp: Date.now() + 6 * 3600_000, dev });
   const res: SessionResponse = {
@@ -213,7 +217,7 @@ app.get("/api/summary", async (c) => {
 
 async function summary(env: Env) {
   const day = Date.now() - 86_400_000;
-  const [settings, spend, stats, enquiries, chats, failedAnswers, failedAttempts, failedAlerts, failedMails] = await Promise.all([
+  const [settings, spend, stats, enquiries, chats, failedAnswers, failedAttempts, cutOffAnswers, failedAlerts, failedMails] = await Promise.all([
     db.getSettings(env.DB),
     db.spendToday(env.DB),
     db.stats(env.DB, 7),
@@ -221,13 +225,14 @@ async function summary(env: Env) {
     db.listChats(env.DB, { limit: 20 }),
     db.countIncidents(env.DB, "turn_failed", day),
     db.countIncidents(env.DB, "attempt_failed", day),
+    db.countIncidents(env.DB, "turn_interrupted", day),
     db.countIncidents(env.DB, "alert_failed", day),
     db.countIncidents(env.DB, "mail_failed", day),
   ]);
   return {
     aiEnabled: settings.aiEnabled,
     ownerOnline: settings.ownerOnline,
-    problemsLast24h: { failedAnswers, failedAttempts, failedAlerts, failedMails },
+    problemsLast24h: { failedAnswers, failedAttempts, cutOffAnswers, failedAlerts, failedMails },
     spendTodayUsd: spend,
     dailyBudgetUsd: settings.dailyBudgetUsd,
     newEnquiries: enquiries.filter((e) => e.status === "new").length,
@@ -326,6 +331,7 @@ function sanitizeSettings(p: Partial<Settings>): Partial<Settings> {
     ["maxMessageChars", 100, 10000],
     ["stallTimeoutSec", 5, 300],
     ["turnTimeoutSec", 10, 900],
+    ["deltaBatchMs", 0, 1000],
     ["cooldownAfterFailures", 1, 100],
     ["cooldownMinutes", 1, 1440],
     ["archiveAfterDays", 1, 365],

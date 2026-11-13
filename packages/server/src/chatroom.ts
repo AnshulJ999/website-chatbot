@@ -72,14 +72,28 @@ interface RoomState {
   location?: string;
   /** Messages exchanged while the owner had the chat; given to the AI on hand-back. */
   handBack: string[];
-  /** Set while an answer is being produced; the alarm uses it to recover from an evicted object. */
+  /** Set while an answer is being produced; still set after a restart means the answer was cut off. */
   turnDeadline?: number;
+  /** The model and question of the answer in progress, for finishing it after a cut-off. */
+  turnTier?: ModelTier;
+  turnQuestion?: string;
+  /** Recoveries of the current answer; stops a recovery that keeps getting cut off. */
+  recoveries?: number;
+  /** Set after a cut-off: this chat's answers arrive whole, without streaming. */
+  noStreaming?: boolean;
   transcriptsSent: number;
 }
 
 type Socket = { role: "visitor" | "owner" };
 
 const RETRY_NOTE = "[The previous answer was interrupted. Please answer the visitor's last message again.]";
+
+/** CPU test only: a fixed amount of work, since the clock doesn't move during pure computation in Workers. */
+function burnCpu(ms: number): void {
+  let x = 0;
+  for (let i = 0; i < ms * 150_000; i++) x += Math.sqrt(i);
+  if (x < 0) console.log(x);
+}
 
 export class ChatRoom extends DurableObject<Env> {
   private st!: RoomState;
@@ -88,6 +102,11 @@ export class ChatRoom extends DurableObject<Env> {
   private abort?: AbortController;
   /** Effective owner presence (toggle on and an inbox open), refreshed on each event. */
   private online = false;
+  private recovering = false;
+  /** Last sign of life from the brain; tells the alarm whether a turn is still running. */
+  private lastTouch = 0;
+  private deltaBuf: string[] = [];
+  private deltaTimer?: ReturnType<typeof setTimeout>;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -130,6 +149,8 @@ export class ChatRoom extends DurableObject<Env> {
     } else {
       this.sendTo(server, { t: "presence", visitorOnline: this.ctx.getWebSockets("visitor").length > 0, page: this.st.page });
     }
+    // An answer still marked in progress while nothing is running was cut off: finish it now.
+    if (this.st.turnDeadline && !this.busy) void this.recover("reconnect");
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -300,6 +321,9 @@ export class ChatRoom extends DurableObject<Env> {
         for (let retry = 0; retry < 2; retry++) {
           if (this.st.mode !== "ai") return; // the owner took over mid-answer
           if (Date.now() >= deadline) break tiers;
+          this.st.turnTier = tier;
+          this.st.turnQuestion = text.slice(0, 2000);
+          await this.save();
           try {
             const result = await this.runAttempt(brain, tier, `${inputId}-${attempt++}`, input, settings, site, deadline);
             await this.finishTurn(result.text, result.totalCostUsd, tier, site);
@@ -327,14 +351,98 @@ export class ChatRoom extends DurableObject<Env> {
       await this.toForm("ai_unavailable", settings);
       await this.turnFailed(site, text, [...failures, `server error: ${e instanceof Error ? e.message : String(e)}`]);
     } finally {
-      this.busy = false;
-      this.progress = undefined;
-      this.abort = undefined;
-      this.st.turnDeadline = undefined;
-      await this.save();
-      await this.ctx.storage.deleteAlarm();
-      this.broadcastStatus(settings);
+      await this.endTurn(settings);
     }
+  }
+
+  private async endTurn(settings: Settings): Promise<void> {
+    this.busy = false;
+    this.progress = undefined;
+    this.abort = undefined;
+    this.st.turnDeadline = undefined;
+    this.st.turnTier = undefined;
+    this.st.turnQuestion = undefined;
+    this.st.recoveries = 0;
+    await this.save();
+    await this.ctx.storage.deleteAlarm();
+    this.broadcastStatus(settings);
+  }
+
+  /**
+   * Finishes an answer that was cut off (Cloudflare stopped the object mid-answer): logs it, alerts,
+   * and reads the answer from Omnara without streaming. This chat streams no more after a cut-off.
+   */
+  private async recover(trigger: "reconnect" | "alarm"): Promise<void> {
+    if (this.recovering || this.busy || !this.st.turnDeadline) return;
+    this.recovering = true;
+    this.busy = true;
+    const settings = await db.getSettings(this.env.DB);
+    try {
+      const site = await this.site();
+      const tier = this.st.turnTier;
+      const question = this.st.turnQuestion ?? "";
+      this.st.noStreaming = true;
+      this.st.recoveries = (this.st.recoveries ?? 0) + 1;
+      const deadline = Date.now() + settings.turnTimeoutSec * 1000;
+      this.st.turnDeadline = deadline + 30_000;
+      await this.save();
+      await this.ctx.storage.setAlarm(this.st.turnDeadline);
+      this.broadcastStatus(settings);
+      await this.interrupted(site, tier, question, trigger);
+      try {
+        const brain = this.brain();
+        if (!tier || !brain.resume || !this.st.brain.agentId) throw new BrainFailure("error", "nothing to resume");
+        if (this.st.recoveries > 2) throw new BrainFailure("error", "cut off again while recovering");
+        const result = await this.runAttempt(brain, tier, `resume-${Date.now()}`, question, settings, site, deadline, true);
+        if (this.st.mode === "ai") await this.finishTurn(result.text, result.totalCostUsd, tier, site);
+      } catch (e) {
+        console.error("recover", e);
+        const why = e instanceof Error ? e.message : String(e);
+        if (this.st.mode === "ai") await this.toForm("ai_unavailable", settings);
+        await this.turnFailed(site, question, [`answer cut off, recovery failed: ${why}`]);
+      }
+    } finally {
+      this.recovering = false;
+      await this.endTurn(settings);
+    }
+  }
+
+  /** Logs a cut-off answer, alerts (throttled) and feeds the "unreliable" check. */
+  private async interrupted(site: SiteConfig, tier: ModelTier | undefined, question: string, trigger: string): Promise<void> {
+    await db.logIncident(this.env.DB, {
+      site: site.key,
+      chatId: this.st.chatId,
+      kind: "turn_interrupted",
+      model: tier?.model,
+      detail: `found on ${trigger}, recovery ${this.st.recoveries ?? 1} | ${question.slice(0, 300)}`,
+    });
+    if (await db.alertDue(this.env.DB, "turn_interrupted", FAILED_ALERT_EVERY_MS)) {
+      this.alert(site, {
+        title: `${site.alertName ?? site.name} chat - answer cut off - ${this.where()}`,
+        lines: [`❓ ${quote(question || "unknown question")}`, `✂️ Cloudflare stopped the answer (${tier?.label ?? "unknown model"}); recovering it without streaming`],
+        priority: 3,
+        tags: ["scissors"],
+        actions: [{ label: "Open chat", url: inboxLink(this.env, this.st.chatId) }],
+      });
+    }
+    await this.checkUnreliable(site, `answer cut off (${tier?.label ?? "unknown model"})`);
+  }
+
+  /** "Unreliable" alert when failed or cut-off answers pile up within the window. */
+  private async checkUnreliable(site: SiteConfig, latest: string): Promise<void> {
+    const since = Date.now() - UNRELIABLE_WINDOW_MS;
+    const [failed, cut] = await Promise.all([
+      db.countIncidents(this.env.DB, "turn_failed", since),
+      db.countIncidents(this.env.DB, "turn_interrupted", since),
+    ]);
+    if (failed + cut < UNRELIABLE_AFTER || !(await db.alertDue(this.env.DB, "unreliable", UNRELIABLE_ALERT_EVERY_MS))) return;
+    this.alert(site, {
+      title: `Chatbot unreliable - ${failed} failed and ${cut} cut-off answers in 30 min`,
+      lines: [`🚨 Latest: ${latest}`, `Every failure is logged (inbox Stats and /admin/api/incidents).`],
+      priority: 4,
+      tags: ["rotating_light"],
+      actions: [{ label: "Open inbox", url: `${this.env.PUBLIC_URL}/admin/` }],
+    });
   }
 
   /** Logs a failed answer and alerts (throttled), plus an "unreliable" alert when failures pile up. */
@@ -350,45 +458,60 @@ export class ChatRoom extends DurableObject<Env> {
         actions: [{ label: "Open chat", url: link }],
       });
     }
-    const recent = await db.countIncidents(this.env.DB, "turn_failed", Date.now() - UNRELIABLE_WINDOW_MS);
-    if (recent >= UNRELIABLE_AFTER && (await db.alertDue(this.env.DB, "unreliable", UNRELIABLE_ALERT_EVERY_MS))) {
-      this.alert(site, {
-        title: `Chatbot unreliable - ${recent} failed answers in 30 min`,
-        lines: [`🚨 Latest: ${failures.join(" · ")}`, `Every failure is logged (inbox Stats and /admin/api/incidents).`],
-        priority: 4,
-        tags: ["rotating_light"],
-        actions: [{ label: "Open inbox", url: `${this.env.PUBLIC_URL}/admin/` }],
-      });
-    }
+    await this.checkUnreliable(site, failures.join(" · "));
   }
 
-  private async runAttempt(brain: Brain, tier: ModelTier, key: string, text: string, settings: Settings, site: SiteConfig, deadline: number) {
+  private async runAttempt(brain: Brain, tier: ModelTier, key: string, text: string, settings: Settings, site: SiteConfig, deadline: number, resume = false) {
     const abort = new AbortController();
     this.abort = abort;
     let last = Date.now();
+    this.lastTouch = last;
     const timer = setInterval(() => {
       const now = Date.now();
       if (now - last > settings.stallTimeoutSec * 1000 || now >= deadline) abort.abort();
     }, 1000);
+    if (this.env.CPU_TEST === "1" && this.st.dev?.cpuBurnMs) burnCpu(this.st.dev.cpuBurnMs);
+    const req = { text, key, visitorId: this.st.visitorId, site, tier, streaming: settings.streaming && !this.st.noStreaming, signal: abort.signal };
+    const cb = {
+      touch: () => (last = this.lastTouch = Date.now()),
+      progress: (p: string) => {
+        this.progress = p;
+        this.broadcastStatus(settings);
+      },
+      delta: (raw: string) => this.queueDelta(raw, settings.deltaBatchMs),
+      deltaReset: () => {
+        this.dropDeltas();
+        this.broadcast({ t: "delta_reset" });
+      },
+      runTool: (name: string, input: Record<string, unknown>) => this.runTool(name, input, settings, site),
+      saveState: () => this.save(),
+    };
     try {
-      return await brain.turn(
-        this.st.brain,
-        { text, key, visitorId: this.st.visitorId, site, tier, streaming: settings.streaming, signal: abort.signal },
-        {
-          touch: () => (last = Date.now()),
-          progress: (p) => {
-            this.progress = p;
-            this.broadcastStatus(settings);
-          },
-          delta: (raw) => this.sendRaw("D" + raw),
-          deltaReset: () => this.broadcast({ t: "delta_reset" }),
-          runTool: (name, input) => this.runTool(name, input, settings, site),
-          saveState: () => this.save(),
-        },
-      );
+      return await (resume && brain.resume ? brain.resume(this.st.brain, req, cb) : brain.turn(this.st.brain, req, cb));
     } finally {
       clearInterval(timer);
+      // The finished answer replaces the preview, so words still waiting to be sent are dropped.
+      this.dropDeltas();
     }
+  }
+
+  /** Streams words to the browser, one message per piece or in batches of `ms`. */
+  private queueDelta(raw: string, ms: number): void {
+    if (ms <= 0) return this.sendRaw("D" + raw);
+    this.deltaBuf.push(raw);
+    this.deltaTimer ??= setTimeout(() => {
+      this.deltaTimer = undefined;
+      const batch = this.deltaBuf;
+      this.deltaBuf = [];
+      // Each piece is already JSON, so joining them makes a JSON array without parsing anything.
+      if (batch.length) this.sendRaw(batch.length === 1 ? "D" + batch[0] : `B[${batch.join(",")}]`);
+    }, ms);
+  }
+
+  private dropDeltas(): void {
+    if (this.deltaTimer) clearTimeout(this.deltaTimer);
+    this.deltaTimer = undefined;
+    this.deltaBuf = [];
   }
 
   private async finishTurn(raw: string, totalCost: number, tier: ModelTier, site: SiteConfig): Promise<void> {
@@ -625,12 +748,13 @@ export class ChatRoom extends DurableObject<Env> {
   }
 
   override async alarm(): Promise<void> {
-    // Only fires if a turn outlived its deadline, e.g. the object was evicted mid-answer.
-    if (!this.st?.turnDeadline || this.busy) return;
-    this.st.turnDeadline = undefined;
-    await this.save();
-    this.add({ id: newId("m"), role: "system", text: "Sorry, that answer didn't come through. Please ask again." });
-    this.broadcastStatus(await db.getSettings(this.env.DB));
+    // Fires only when an answer outlived its deadline: the object was cut off or reset mid-answer.
+    if (!this.st?.turnDeadline) return;
+    if (this.busy && Date.now() - this.lastTouch < 60_000) return;
+    // Still "busy" with no sign of life for a minute: the code running the answer is gone.
+    this.busy = false;
+    this.recovering = false;
+    await this.recover("alarm");
   }
 
   // ---------- helpers ----------
