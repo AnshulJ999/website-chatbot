@@ -1,5 +1,5 @@
 import { newId, type AnalyticsEvent, type ClientMsg, type ServerMsg, type SessionRequest, type SessionResponse } from "@website-chatbot/shared";
-import { flash, live, patch, site } from "./store";
+import { flash, live, pageUrl, patch, site } from "./store";
 
 export interface ClientOptions {
   server: string;
@@ -48,7 +48,7 @@ export class ChatClient {
   private outbox: ClientMsg[] = [];
   private retries = 0;
   private pageTimer?: number;
-  private lastPage = location.href;
+  private lastPage = pageUrl();
   private previewCtx = "";
   private closedByUs = false;
   private starting?: Promise<boolean>;
@@ -57,7 +57,7 @@ export class ChatClient {
 
   /** Dev only: brain and scenario for the next session. */
   setDev(dev: ClientOptions["dev"]): void {
-    this.o.dev = dev;
+    this.o.dev = { ...dev, pass: this.o.dev?.pass };
   }
 
   /** Creates or resumes the session and opens the live connection. */
@@ -77,7 +77,7 @@ export class ChatClient {
       chatId: newChat ? undefined : saved.chatId,
       newChat,
       turnstileToken,
-      page: { url: location.href, title: document.title, referrer: document.referrer },
+      page: { url: pageUrl(), title: document.title, referrer: document.referrer },
       device: { width: window.innerWidth, touch: matchMedia("(pointer: coarse)").matches, lang: navigator.language, tz: Intl.DateTimeFormat().resolvedOptions().timeZone },
       dev: this.o.dev,
     };
@@ -114,7 +114,7 @@ export class ChatClient {
     this.closedByUs = false;
     const q = new URLSearchParams({
       token: this.session.token,
-      page: location.pathname + location.search,
+      page: pathOf(pageUrl()),
       title: document.title,
       ref: document.referrer,
       device: `${matchMedia("(pointer: coarse)").matches ? "touch" : "mouse"} · ${window.innerWidth}px`,
@@ -232,11 +232,17 @@ export class ChatClient {
     clearInterval(this.pageTimer);
     // Single-page sites change URL without reloading; a cheap poll catches it.
     this.pageTimer = window.setInterval(() => {
-      if (location.href === this.lastPage) return;
-      this.lastPage = location.href;
-      this.send({ t: "page", url: location.pathname + location.search, title: document.title });
+      const url = pageUrl();
+      if (url === this.lastPage) return;
+      this.lastPage = url;
+      this.send({ t: "page", url: pathOf(url), title: document.title });
     }, 1500);
   }
+}
+
+function pathOf(url: string): string {
+  const u = new URL(url);
+  return u.pathname + u.search;
 }
 
 let turnstileLoading: Promise<void> | undefined;

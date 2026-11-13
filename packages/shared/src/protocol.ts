@@ -75,8 +75,16 @@ export interface SessionRequest {
   turnstileToken?: string;
   page: { url: string; title: string; referrer: string };
   device: { width: number; touch: boolean; lang: string; tz: string };
-  /** Dev only: "scripted" brain and a forced scenario. Ignored unless the server runs in dev mode. */
-  dev?: { brain?: "real" | "scripted"; scenario?: string };
+  /** Playground only: brain, forced scenario, owner-name override. Honoured in dev mode or for the signed-in owner. */
+  dev?: DevOptions;
+}
+
+export interface DevOptions {
+  brain?: "real" | "scripted";
+  scenario?: string;
+  ownerName?: string;
+  /** Owner pass from /admin/api/dev-pass; lets the hosted Playground use these options. */
+  pass?: string;
 }
 
 export interface SessionResponse {

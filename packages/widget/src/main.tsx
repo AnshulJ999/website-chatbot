@@ -17,6 +17,8 @@ export interface WidgetOptions {
 }
 
 declare global {
+  /** True in the Playground (dev server and its hosted build); false in the visitor widget. */
+  const __WCB_PLAYGROUND__: boolean;
   interface Window {
     WebsiteChatbotOptions?: WidgetOptions;
     WebsiteChatbot?: { open(): void; close(): void; newChat(): void };
@@ -110,7 +112,7 @@ export async function boot(opts: WidgetOptions): Promise<void> {
     newChat: () => void client.newChat(),
   };
 
-  if (import.meta.env.DEV) {
+  if (__WCB_PLAYGROUND__) {
     const dev = await import("./dev");
     dev.initDev(host, opts, client);
   }

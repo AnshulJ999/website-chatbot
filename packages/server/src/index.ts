@@ -2,11 +2,12 @@ import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
 import PostalMime from "postal-mime";
 import { newId, toPublic, type SessionRequest, type SessionResponse, type Settings, type SiteConfig } from "@website-chatbot/shared";
-import { makeToken, readReplyTag, readToken, verifyAccess, verifySig, verifyTurnstile, visitorKey } from "./auth";
+import { makeOwnerPass, makeToken, readReplyTag, readToken, verifyAccess, verifyOwnerPass, verifySig, verifyTurnstile, visitorKey } from "./auth";
 import type { RoomInit } from "./chatroom";
 import * as db from "./db";
 import { DEMO_SITE } from "./demo-site";
 import { isDev, type Env } from "./env";
+import { ntfy } from "./notify";
 
 export { ChatRoom } from "./chatroom";
 export { Hub } from "./hub";
@@ -23,15 +24,49 @@ async function siteFor(env: Env, key: string): Promise<SiteConfig | null> {
   return isDev(env) && key === "demo" ? DEMO_SITE : null;
 }
 
+const ownOrigin = (env: Env) => {
+  try {
+    return env.PUBLIC_URL ? new URL(env.PUBLIC_URL).origin : "";
+  } catch {
+    return "";
+  }
+};
+
 function originAllowed(env: Env, site: SiteConfig, origin: string | undefined): boolean {
   if (!origin) return false;
-  if (site.origins.includes(origin)) return true;
+  // The site's own pages, plus the hosted Playground on this server.
+  if (site.origins.includes(origin) || origin === ownOrigin(env)) return true;
   return isDev(env) && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
 }
 
-function cfInfo(c: Context<App>): { country?: string; city?: string; ip: string | null } {
+/** Dev sites, local pages and the Playground: their alerts are marked [DEV]. */
+function isDevOrigin(env: Env, origin: string | undefined): boolean {
+  if (!origin) return false;
+  try {
+    const host = new URL(origin).hostname;
+    return host === "localhost" || host === "127.0.0.1" || host.startsWith("dev.") || origin === ownOrigin(env);
+  } catch {
+    return false;
+  }
+}
+
+const REGIONS = new Intl.DisplayNames(["en"], { type: "region" });
+
+function cfInfo(c: Context<App>): { country?: string; city?: string; ip: string | null; location: string } {
   const cf = (c.req.raw as Request & { cf?: { country?: string; city?: string } }).cf;
-  return { country: cf?.country, city: cf?.city, ip: c.req.header("CF-Connecting-IP") ?? null };
+  let countryName = cf?.country ?? "";
+  try {
+    if (countryName && countryName !== "XX" && countryName !== "T1") countryName = REGIONS.of(countryName) ?? countryName;
+  } catch {
+    // unknown code: keep it
+  }
+  const location = [cf?.city, countryName].filter(Boolean).join(", ") || "Unknown location";
+  return { country: cf?.country, city: cf?.city, ip: c.req.header("CF-Connecting-IP") ?? null, location };
+}
+
+/** The owner counts as online when the inbox toggle is on and an inbox tab is (or was just) open. */
+async function ownerOnline(env: Env, settings: Settings): Promise<boolean> {
+  return settings.ownerOnline && (await hub(env).ownerPresent());
 }
 
 // ---------- visitor API ----------
@@ -51,10 +86,12 @@ app.post("/api/session", async (c) => {
   if (!originAllowed(env, site, c.req.header("Origin"))) return c.json({ error: "origin" }, 403);
 
   const { country, city, ip } = cfInfo(c);
+  // Playground options: always locally, and on the deployed server for the signed-in owner only.
+  const devOk = isDev(env) || (await verifyOwnerPass(env.TOKEN_SECRET, body.dev?.pass));
   let visitorId = body.visitorId && /^v_[\w]+$/.test(body.visitorId) ? body.visitorId : undefined;
   const known = !!visitorId && !!body.visitorKey && (await verifySig(env.TOKEN_SECRET, `visitor:${visitorId}`, body.visitorKey));
   if (!known) {
-    if (!isDev(env) && site.turnstileSiteKey && !(await verifyTurnstile(env, body.turnstileToken, ip))) {
+    if (!devOk && site.turnstileSiteKey && !(await verifyTurnstile(env, body.turnstileToken, ip))) {
       return c.json({ error: "turnstile_required", siteKey: site.turnstileSiteKey }, 401);
     }
     visitorId = newId("v");
@@ -74,7 +111,13 @@ app.post("/api/session", async (c) => {
   await db.upsertVisitor(env.DB, { id: vid, site: site.key, country, city, device });
 
   const settings = await db.getSettings(env.DB);
-  const dev = isDev(env) ? body.dev : undefined;
+  // The daily clean-up rides on the first chat of the day, so no cron trigger is needed (Workers Free allows 5 per account).
+  c.executionCtx.waitUntil(dailyJobIfDue(env));
+  let dev: SessionRequest["dev"];
+  if (devOk && body.dev) {
+    const { pass: _pass, ...rest } = body.dev;
+    dev = { ...rest, ownerName: rest.ownerName?.slice(0, 60) };
+  }
   const token = await makeToken(env.TOKEN_SECRET, { chatId, visitorId: vid, site: site.key, exp: Date.now() + 6 * 3600_000, dev });
   const res: SessionResponse = {
     visitorId: vid,
@@ -84,7 +127,7 @@ app.post("/api/session", async (c) => {
     wsUrl: "/api/chat/ws",
     site: toPublic(site),
     aiEnabled: settings.aiEnabled,
-    ownerOnline: settings.ownerOnline,
+    ownerOnline: await ownerOnline(env, settings),
   };
   return c.json(res);
 });
@@ -94,13 +137,16 @@ app.get("/api/chat/ws", async (c) => {
   const t = await readToken(env.TOKEN_SECRET, c.req.query("token") ?? "");
   if (!t) return c.text("bad token", 401);
   const site = await siteFor(env, t.site);
-  if (!site || !originAllowed(env, site, c.req.header("Origin"))) return c.text("origin", 403);
+  const origin = c.req.header("Origin");
+  if (!site || !originAllowed(env, site, origin)) return c.text("origin", 403);
   const q = c.req.query();
   const init: RoomInit = {
     chatId: t.chatId,
     site: t.site,
     visitorId: t.visitorId,
     dev: t.dev,
+    devHost: isDevOrigin(env, origin),
+    location: cfInfo(c).location,
     page: q.page?.slice(0, 500),
     title: q.title?.slice(0, 200),
     referrer: q.ref?.slice(0, 500) || undefined,
@@ -119,7 +165,7 @@ app.get("/api/site/:key", async (c) => {
   if (!site) return c.json({ error: "unknown_site" }, 404);
   const settings = await db.getSettings(c.env.DB);
   return c.json(
-    { site: toPublic(site), aiEnabled: settings.aiEnabled, ownerOnline: settings.ownerOnline },
+    { site: toPublic(site), aiEnabled: settings.aiEnabled, ownerOnline: await ownerOnline(c.env, settings) },
     200,
     { "Cache-Control": "public, max-age=600", "Access-Control-Allow-Origin": "*" },
   );
@@ -138,22 +184,50 @@ app.put("/api/sync/site", async (c) => {
   return c.json({ ok: true, key: site.key });
 });
 
+/** The owner's Playground pass for scripts holding the API token (same as /admin/api/dev-pass). */
+app.get("/api/dev-pass", async (c) => {
+  if (!bearer(c)) return c.text("unauthorized", 401);
+  return c.json({ pass: await makeOwnerPass(c.env.TOKEN_SECRET, 1) });
+});
+
+/** Sends a test alert to a site's ntfy topic, to check delivery from Cloudflare. */
+app.post("/api/test-alert/:key", async (c) => {
+  if (!bearer(c)) return c.text("unauthorized", 401);
+  const site = await siteFor(c.env, c.req.param("key"));
+  if (!site) return c.json({ error: "unknown_site" }, 404);
+  const error = await ntfy(c.env, site, {
+    title: `${site.alertName ?? site.name} chat - test alert`,
+    lines: ["🔔 Sent from the chatbot server to check that alerts arrive."],
+    priority: 2,
+    tags: ["bell"],
+    actions: [{ label: "Open inbox", url: `${c.env.PUBLIC_URL}/admin/` }],
+    dev: true,
+  });
+  return c.json({ ok: !error, error });
+});
+
 app.get("/api/summary", async (c) => {
   if (!bearer(c)) return c.text("unauthorized", 401);
   return c.json(await summary(c.env));
 });
 
 async function summary(env: Env) {
-  const [settings, spend, stats, enquiries, chats] = await Promise.all([
+  const day = Date.now() - 86_400_000;
+  const [settings, spend, stats, enquiries, chats, failedAnswers, failedAttempts, failedAlerts, failedMails] = await Promise.all([
     db.getSettings(env.DB),
     db.spendToday(env.DB),
     db.stats(env.DB, 7),
     db.listEnquiries(env.DB, 20),
     db.listChats(env.DB, { limit: 20 }),
+    db.countIncidents(env.DB, "turn_failed", day),
+    db.countIncidents(env.DB, "attempt_failed", day),
+    db.countIncidents(env.DB, "alert_failed", day),
+    db.countIncidents(env.DB, "mail_failed", day),
   ]);
   return {
     aiEnabled: settings.aiEnabled,
     ownerOnline: settings.ownerOnline,
+    problemsLast24h: { failedAnswers, failedAttempts, failedAlerts, failedMails },
     spendTodayUsd: spend,
     dailyBudgetUsd: settings.dailyBudgetUsd,
     newEnquiries: enquiries.filter((e) => e.status === "new").length,
@@ -179,6 +253,11 @@ app.get("/admin/api/overview", async (c) => {
 });
 
 app.get("/admin/api/sites", async (c) => c.json(await db.listSites(c.env.DB)));
+
+/** Lets the hosted Playground use its test options (scripted brain, scenarios) for the signed-in owner. */
+app.get("/admin/api/dev-pass", async (c) => c.json({ pass: await makeOwnerPass(c.env.TOKEN_SECRET) }));
+
+app.get("/admin/api/incidents", async (c) => c.json(await db.recentIncidents(c.env.DB, Math.min(Number(c.req.query("limit") ?? 100), 500))));
 
 app.patch("/admin/api/settings", async (c) => {
   const patch = await c.req.json<Partial<Settings>>();
@@ -292,16 +371,30 @@ export default {
     if (text) await room(env, chatId).emailReply(message.from, text);
   },
 
+  /** Optional: with a cron trigger configured, the clean-up also runs on schedule. */
   async scheduled(_event: ScheduledController, env: Env): Promise<void> {
-    const settings = await db.getSettings(env.DB, true);
-    const idle = await db.idleAgents(env.DB, Date.now() - settings.archiveAfterDays * 86_400_000);
-    for (const chat of idle) {
-      try {
-        await room(env, chat.id).archiveAgent();
-        await env.DB.prepare("UPDATE chats SET agent_archived = 1 WHERE id = ?").bind(chat.id).run();
-      } catch (e) {
-        console.error("archive", chat.id, e);
-      }
-    }
+    await dailyJob(env);
   },
 } satisfies ExportedHandler<Env>;
+
+async function dailyJobIfDue(env: Env): Promise<void> {
+  try {
+    if (await db.alertDue(env.DB, "daily-job", 20 * 3600_000)) await dailyJob(env);
+  } catch (e) {
+    console.error("daily job", e);
+  }
+}
+
+/** Archives Omnara agents of chats idle for archiveAfterDays; a later message starts a fresh agent with a recap. */
+async function dailyJob(env: Env): Promise<void> {
+  const settings = await db.getSettings(env.DB, true);
+  const idle = await db.idleAgents(env.DB, Date.now() - settings.archiveAfterDays * 86_400_000);
+  for (const chat of idle) {
+    try {
+      await room(env, chat.id).archiveAgent();
+      await env.DB.prepare("UPDATE chats SET agent_archived = 1 WHERE id = ?").bind(chat.id).run();
+    } catch (e) {
+      console.error("archive", chat.id, e);
+    }
+  }
+}

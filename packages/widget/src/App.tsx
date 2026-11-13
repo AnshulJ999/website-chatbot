@@ -3,7 +3,7 @@ import { isEmail, renderMarkdown, startersFor, visiblePreview, type ChatMessage,
 import { emit, type ChatClient } from "./client";
 import { Icon } from "./icons";
 
-import { forced, live, notice, setView, site, ui, type View } from "./store";
+import { currentPath, forced, live, notice, setView, site, ui, type View } from "./store";
 
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 const CLOSE_MS = 180;
@@ -277,7 +277,7 @@ function Messages({ client, site: s, v, formReason }: { client: ChatClient; site
 function Welcome({ client, site: s, v }: { client: ChatClient; site: PublicSiteConfig; v: View }) {
   const u = ui.value;
   const hasChat = v.messages.some((m) => m.role === "visitor");
-  const starters = startersFor(s.starters, location.pathname);
+  const starters = startersFor(s.starters, currentPath());
   return (
     <div class="welcome">
       <div class="msg ai" dangerouslySetInnerHTML={{ __html: renderMarkdown(s.greeting) }} />

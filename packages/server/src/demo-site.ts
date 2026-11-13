@@ -20,7 +20,7 @@ export const DEMO_SITE: SiteConfig = {
   ui: {},
   proactive: { enabled: true, delaySec: 20, text: "Questions? I can help." },
   origins: [],
-  storeName: "chatbot-spike-kl",
+  storeName: "website-chatbot-kopialens",
   instruction: "This is a demo site for testing the chat widget. Its knowledge store holds the KopiaLens website docs.",
   tools: ["save_enquiry", "request_owner"],
   ownerEmail: "owner@example.com",

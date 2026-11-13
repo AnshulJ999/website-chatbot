@@ -3,7 +3,11 @@ import { Omnara, OmnaraError, type Actor, type ContentBlock, type TimelineEvent 
 import { agentConfig } from "./agent-config";
 import { BrainFailure, type Brain, type BrainState, type TurnCallbacks, type TurnRequest, type TurnResult } from "./types";
 
-const SAVED = new Set(["agent_input", "model_output", "tool_result", "context_checkpoint"]);
+/** Events the turn reads in full. */
+const PARSED = new Set(["agent_input", "model_output"]);
+/** Events only counted for resuming; never parsed, since tool results carry whole knowledge files. */
+const COUNTED = new Set(["tool_result", "context_checkpoint"]);
+const SEQUENCE = /"sequence"\s*:\s*(\d+)/;
 
 export class OmnaraBrain implements Brain {
   private readonly api: Omnara;
@@ -78,7 +82,12 @@ export class OmnaraBrain implements Brain {
             if (err.code === "service_unavailable") break;
             throw new BrainFailure("error", `stream error ${err.code}`);
           }
-          if (!SAVED.has(f.event)) continue;
+          if (COUNTED.has(f.event)) {
+            const seq = Number(SEQUENCE.exec(f.data)?.[1]);
+            if (seq) state.lastSeq = Math.max(state.lastSeq, seq);
+            continue;
+          }
+          if (!PARSED.has(f.event)) continue;
           const ev = JSON.parse(f.data) as TimelineEvent;
           state.lastSeq = Math.max(state.lastSeq, ev.sequence);
           const done = this.onEvent(ev, cb, () => (sawInput = true), sawInput);

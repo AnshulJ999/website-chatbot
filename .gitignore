@@ -8,3 +8,5 @@ _scratch_*
 packages/server/public/widget/
 packages/server/public/admin/
 devnotes/
+.deploy.vars
+packages/server/public/playground/

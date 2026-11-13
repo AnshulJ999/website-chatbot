@@ -1,3 +1,4 @@
+import type { DevOptions } from "@website-chatbot/shared";
 import type { Env } from "./env";
 
 const enc = new TextEncoder();
@@ -37,7 +38,20 @@ export interface ChatToken {
   visitorId: string;
   site: string;
   exp: number;
-  dev?: { brain?: string; scenario?: string };
+  dev?: DevOptions;
+}
+
+/** Short-lived proof that a Playground session belongs to the signed-in owner: "<exp>.<sig>". */
+export async function makeOwnerPass(secret: string, hours = 12): Promise<string> {
+  const exp = Date.now() + hours * 3600_000;
+  return `${exp}.${await sign(secret, `owner-pass:${exp}`)}`;
+}
+
+export async function verifyOwnerPass(secret: string, pass: string | undefined): Promise<boolean> {
+  if (!pass) return false;
+  const [exp, sig] = pass.split(".");
+  if (!exp || !sig || Number(exp) < Date.now()) return false;
+  return verifySig(secret, `owner-pass:${exp}`, sig);
 }
 
 export async function makeToken(secret: string, t: ChatToken): Promise<string> {

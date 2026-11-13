@@ -2,7 +2,7 @@
 // kb-sync: copies a site's content into its Omnara memory store (one file per page, each starting
 // with its real URL) and pushes the site's chatbot config to the chat server.
 //
-//   node sync.ts <site>/chatbot/chatbot.config.json [--env <file>] [--dry-run] [--prune] [--create-store] [--no-push]
+//   node sync.ts <site>/chatbot/chatbot.config.json [--env <file>] [--dry-run [--show <store path>]] [--prune] [--create-store] [--no-push]
 //
 // Credentials come from the environment or --env (a KEY=value file such as the server's .dev.vars):
 // OMNARA_API_KEY, OMNARA_ORG_ID, OMNARA_PROJECT_ID, CHATBOT_SERVER (or PUBLIC_URL), API_TOKEN.
@@ -10,25 +10,41 @@
 import { createHash } from "node:crypto";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
+import { gfm } from "@joplin/turndown-plugin-gfm";
+import { parseHTML } from "linkedom";
+import TurndownService from "turndown";
 
 interface Source {
-  /** "dir": every .md/.mdx/.txt file under `dir`; "file": one file; "url": fetch a page (e.g. /llms.txt). */
-  type: "dir" | "file" | "url";
+  /**
+   * "dir": every .md/.mdx/.txt file under `dir`; "file": one file; "url": fetch one text page (e.g. /llms.txt);
+   * "sitemap": every HTML page in the site's sitemap, converted to Markdown.
+   */
+  type: "dir" | "file" | "url" | "sitemap";
   dir?: string;
   file?: string;
   url?: string;
   /** Page URL template for dir sources: {slug} is the file path without extension. */
-  pageUrl: string;
+  pageUrl?: string;
   /** File name (without extension) that maps to the bare pageUrl, e.g. "README" for /docs. */
   index?: string;
   /** Where the files go inside the store. */
   storePath: string;
+  /** sitemap: the public sitemap URL; its page addresses are what the bot links to. */
+  sitemap?: string;
+  /** sitemap: fetch pages (and the sitemap) from this origin instead, e.g. a local dev server; links keep the public address. */
+  readFrom?: string;
+  /** sitemap: path prefixes already covered by file sources; used only when knowledgeSource is "both". "*" ends a prefix. */
+  exclude?: string[];
+  /** sitemap: CSS selector of the page's main content (default "main", then "body"). */
+  main?: string;
 }
 
 interface SyncConfig {
   /** SiteConfig without `instruction` (read from instructionFile). */
   site: Record<string, unknown> & { key: string; storeName: string };
   instructionFile: string;
+  /** Which sources count: "files" (repo files only), "live" (the sitemap only), "both" (default). */
+  knowledgeSource?: "files" | "live" | "both";
   sources: Source[];
   /** Curated knowledge folder; files may start with their own "URL:" line. */
   curatedDir?: string;
@@ -40,7 +56,7 @@ const opt = (f: string) => {
   const i = args.indexOf(f);
   return i >= 0 ? args[i + 1] : undefined;
 };
-const configPath = args.find((a, i) => !a.startsWith("--") && args[i - 1] !== "--env");
+const configPath = args.find((a, i) => !a.startsWith("--") && args[i - 1] !== "--env" && args[i - 1] !== "--show");
 if (!configPath) {
   console.error("Usage: node sync.ts <chatbot.config.json> [--env <file>] [--dry-run] [--prune] [--create-store] [--no-push]");
   process.exit(2);
@@ -97,23 +113,107 @@ function clean(text: string): string {
 
 const withUrl = (url: string, body: string) => `URL: ${url}\n\n${body}\n`;
 
+// ---------- live pages (sitemap -> Markdown) ----------
+
+const turndown = new TurndownService({ headingStyle: "atx", codeBlockStyle: "fenced", bulletListMarker: "-", emDelimiter: "*" });
+turndown.use(gfm);
+
+
+function pathMatches(path: string, patterns: string[]): boolean {
+  return patterns.some((p) => (p.endsWith("*") ? path.startsWith(p.slice(0, -1)) : path === p || path === p.replace(/\/$/, "")));
+}
+
+/** One page's main content as Markdown, with a short header the agent can cite. */
+export function pageToMarkdown(html: string, publicUrl: string, readOrigin: string, selector = "main"): string {
+  const { document } = parseHTML(html);
+  const title = (document.querySelector("title")?.textContent ?? "").trim();
+  const description = document.querySelector('meta[name="description"]')?.getAttribute("content")?.trim() ?? "";
+  const root = document.querySelector(selector) ?? document.querySelector("main") ?? document.body;
+  const drop = "nav, footer, script, style, noscript, iframe, svg, canvas, video, audio, img, picture, form, button, dialog, [aria-hidden='true'], [hidden], .sr-only, [data-dev-ui]";
+  for (const el of root.querySelectorAll(drop)) el.remove();
+  const publicOrigin = new URL(publicUrl).origin;
+  for (const a of root.querySelectorAll("a[href]")) {
+    const href = a.getAttribute("href") ?? "";
+    try {
+      const abs = new URL(href, publicUrl.replace(publicOrigin, readOrigin));
+      if (abs.origin === readOrigin) abs.href = abs.href.replace(readOrigin, publicOrigin);
+      a.setAttribute("href", abs.href);
+    } catch {
+      // leave odd links as they are
+    }
+  }
+  let md = turndown
+    .turndown(root.innerHTML)
+    .replace(/\[\s*\]\([^)]*\)/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  if (!/^# /m.test(md) && title) md = `# ${title}\n\n${md}`;
+  const head = [`Title: ${title}`, description ? `Description: ${description}` : ""].filter(Boolean).join("\n");
+  return `${head}\n\n${md}`;
+}
+
+async function sitemapUrls(sitemap: string, readOrigin: string, publicOrigin: string): Promise<string[]> {
+  const res = await fetch(sitemap.replace(publicOrigin, readOrigin));
+  if (!res.ok) throw new Error(`${sitemap}: HTTP ${res.status}`);
+  const xml = await res.text();
+  const locs = [...xml.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/g)].map((m) => m[1]!);
+  // A sitemap index lists more sitemaps.
+  if (/<sitemapindex/.test(xml)) return (await Promise.all(locs.map((l) => sitemapUrls(l, readOrigin, publicOrigin)))).flat();
+  return locs;
+}
+
+async function collectSitemap(s: Source, applyExcludes: boolean): Promise<KbFile[]> {
+  const finalSitemap = (await fetch(s.sitemap!, { method: "HEAD", redirect: "follow" }).catch(() => null))?.url || s.sitemap!;
+  const publicOrigin = new URL(finalSitemap).origin;
+  const readOrigin = s.readFrom ? new URL(s.readFrom).origin : publicOrigin;
+  const urls = await sitemapUrls(finalSitemap, readOrigin, publicOrigin);
+  const out: KbFile[] = [];
+  const skipped: string[] = [];
+  const queue = urls.filter((u) => {
+    const path = new URL(u).pathname;
+    if (applyExcludes && s.exclude && pathMatches(path, s.exclude)) return false;
+    return true;
+  });
+  const worker = async () => {
+    for (let u = queue.shift(); u; u = queue.shift()) {
+      const path = new URL(u).pathname.replace(/\/$/, "") || "/";
+      const res = await fetch(u.replace(publicOrigin, readOrigin)).catch(() => null);
+      if (!res?.ok || !(res.headers.get("content-type") ?? "").includes("text/html")) {
+        skipped.push(`${path} (${res ? `${res.status} ${res.headers.get("content-type") ?? ""}` : "unreachable"})`);
+        continue;
+      }
+      const md = pageToMarkdown(await res.text(), u, readOrigin, s.main);
+      const name = path === "/" ? "home" : path.slice(1);
+      out.push({ path: `${s.storePath}/${name}.md`, body: withUrl(u, md) });
+    }
+  };
+  await Promise.all(Array.from({ length: 4 }, worker));
+  if (skipped.length) console.log(`  skipped ${skipped.length} non-HTML or failed pages: ${skipped.join(", ")}`);
+  return out.sort((a, b) => a.path.localeCompare(b.path));
+}
+
 async function collect(): Promise<KbFile[]> {
   const files: KbFile[] = [];
+  const mode = cfg.knowledgeSource ?? "both";
   for (const s of cfg.sources) {
-    if (s.type === "dir") {
+    const live = s.type === "sitemap";
+    if ((mode === "files" && live) || (mode === "live" && !live)) continue;
+    if (s.type === "sitemap") {
+      files.push(...(await collectSitemap(s, mode === "both")));
+    } else if (s.type === "dir") {
       const dir = resolve(base, s.dir!);
       for (const full of walk(dir)) {
         const rel = relative(dir, full).replace(/\\/g, "/");
         const slug = rel.replace(/\.(md|mdx|txt)$/i, "");
-        const url = s.index && slug === s.index ? s.pageUrl.replace(/\/?\{slug\}$/, "") : s.pageUrl.replace("{slug}", slug);
+        const url = s.index && slug === s.index ? s.pageUrl!.replace(/\/?\{slug\}$/, "") : s.pageUrl!.replace("{slug}", slug);
         files.push({ path: `${s.storePath}/${slug}.md`, body: withUrl(url, clean(readFileSync(full, "utf8"))) });
       }
     } else if (s.type === "file") {
-      files.push({ path: s.storePath, body: withUrl(s.pageUrl, clean(readFileSync(resolve(base, s.file!), "utf8"))) });
+      files.push({ path: s.storePath, body: withUrl(s.pageUrl!, clean(readFileSync(resolve(base, s.file!), "utf8"))) });
     } else {
       const res = await fetch(s.url!);
       if (!res.ok) throw new Error(`${s.url}: HTTP ${res.status}`);
-      files.push({ path: s.storePath, body: withUrl(s.pageUrl, (await res.text()).trim()) });
+      files.push({ path: s.storePath, body: withUrl(s.pageUrl!, (await res.text()).trim()) });
     }
   }
   if (cfg.curatedDir) {
@@ -198,6 +298,9 @@ async function main(): Promise<void> {
   console.log(`${files.length} files for store "${cfg.site.storeName}"`);
   if (dryRun) {
     for (const f of files) console.log(`  ${f.path}  (${f.body.length} chars)  ${f.body.split("\n", 1)[0]}`);
+    const show = opt("--show");
+    const hit = show && files.find((f) => f.path === show || f.path === `${show}.md` || f.path.endsWith(`/${show}`) || f.path.endsWith(`/${show}.md`));
+    if (hit) console.log(`\n----- ${hit.path} -----\n${hit.body}`);
   } else {
     let store = await storeId(cfg.site.storeName);
     if (!store) {

@@ -37,8 +37,18 @@ export const live = signal<View>({
   menu: false,
   formDismissed: false,
 });
-/** A sample view forced by the Design menu (dev only). */
+/** A sample view forced by the Playground (dev only). */
 export const forced = signal<View | null>(null);
+/** Playground only: stands in for the page the visitor is on. */
+export const pageOverride = signal<string | null>(null);
+
+export function currentPath(): string {
+  return pageOverride.value ?? location.pathname;
+}
+
+export function pageUrl(): string {
+  return pageOverride.value ? new URL(pageOverride.value, location.origin).href : location.href;
+}
 export const notice = signal<{ text: string; tone: "info" | "error" } | null>(null);
 
 export function patch(p: Partial<View>): void {

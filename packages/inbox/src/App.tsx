@@ -101,7 +101,7 @@ export function App() {
         </nav>
         {s && (
           <div className="flex items-center gap-4 border-t border-border px-4 py-2 md:mt-auto md:block md:space-y-1 md:py-3">
-            <Toggle label="I'm online" hint={s.ownerOnline ? "Visitors can ask you to join" : "Requests go to email"} checked={s.ownerOnline} onChange={(v) => void saveSettings({ ownerOnline: v })} />
+            <Toggle label="I'm online" hint={s.ownerOnline ? "While this inbox is open (10 min grace)" : "Requests go to email"} checked={s.ownerOnline} onChange={(v) => void saveSettings({ ownerOnline: v })} />
             <Toggle label="AI answers" hint={s.aiEnabled ? "On" : "Off: visitors see Get in touch"} checked={s.aiEnabled} onChange={(v) => void saveSettings({ aiEnabled: v })} />
             <p className="hidden pt-1 text-xs text-muted-fg md:block tabular">
               Today {usd(overview.spendTodayUsd)} of {usd(s.dailyBudgetUsd)}

@@ -1,18 +1,26 @@
-// Dev-only: reads the shared Design widget's choices (data-d-* on <html>) and applies them.
-// Never part of the production bundle (imported behind import.meta.env.DEV).
-import { DEFAULT_UI, type ChatMessage, type ChatStatus, type WidgetUi } from "@website-chatbot/shared";
+// Playground-only: applies the Design menu's look choices (data-d-* on <html>) and the Playground
+// panel's test setup (data-pg-*). Never part of the production widget bundle.
+import { DEFAULT_UI, type ChatMessage, type ChatStatus, type PublicSiteConfig, type WidgetUi } from "@website-chatbot/shared";
 import type { ChatClient } from "./client";
 import type { WidgetOptions } from "./main";
-import { EMPTY_STATUS, forced, live, site, ui, type View } from "./store";
+import { EMPTY_STATUS, forced, live, pageOverride, patch, site, ui, type View } from "./store";
 
-const OWNER_WORDING: Record<string, string> = {
+const TALK_WORDING: Record<string, string> = {
   a: "Talk to a person",
   b: "Talk to the developer",
   c: "Contact support",
 };
 
-let baseTalkLabel: string | undefined;
+const OWNER_NAMES: Record<string, string> = {
+  anshul: "Anshul",
+  developer: "the developer",
+  team: "the KopiaLens team",
+  mix: "Anshul (the developer)",
+};
+
+let base: Pick<PublicSiteConfig, "talkLabel" | "ownerName" | "proactive"> | null = null;
 let lastDev = "";
+let bubbleTimer = 0;
 
 export function initDev(_host: HTMLElement, opts: WidgetOptions, client: ChatClient): void {
   const apply = () => {
@@ -26,25 +34,37 @@ export function initDev(_host: HTMLElement, opts: WidgetOptions, client: ChatCli
       talkPlacement: pick("talkPlacement", d.dTalk),
       notice: pick("notice", d.dNotice),
     };
+
+    const ownerName = d.dOwner && OWNER_NAMES[d.dOwner];
     if (site.value) {
-      baseTalkLabel ??= site.value.talkLabel;
-      const word = d.dOwnerword && OWNER_WORDING[d.dOwnerword];
-      const talkLabel = word || baseTalkLabel;
-      if (site.value.talkLabel !== talkLabel) site.value = { ...site.value, talkLabel };
+      base ??= { talkLabel: site.value.talkLabel, ownerName: site.value.ownerName, proactive: site.value.proactive };
+      const talkLabel = (d.dTalkword && TALK_WORDING[d.dTalkword]) || base.talkLabel;
+      const proactive = d.dGreeting === "bubble" ? { ...base.proactive, enabled: true, text: base.proactive.text || `Questions about ${site.value.name}? Ask here.` } : base.proactive;
+      const next = { ...site.value, talkLabel, ownerName: ownerName || base.ownerName, proactive };
+      if (next.talkLabel !== site.value.talkLabel || next.ownerName !== site.value.ownerName || next.proactive !== site.value.proactive) site.value = next;
+      clearTimeout(bubbleTimer);
+      if (d.dGreeting === "bubble" && !live.value.open && !live.value.messages.length) bubbleTimer = window.setTimeout(() => patch({ bubble: true }), 3000);
+      else if (d.dGreeting !== "bubble") patch({ bubble: false });
     }
-    const state = d.dState ?? "live";
+
+    pageOverride.value = d.pgPage || null;
+    const state = d.pgState ?? "live";
     forced.value = state === "live" ? null : sample(state);
 
-    const dev = { brain: (d.dBrain ?? "scripted") as "real" | "scripted", scenario: d.dScenario ?? "none" };
+    const dev = {
+      brain: (d.pgBrain ?? "scripted") as "real" | "scripted",
+      scenario: d.pgScenario ?? "none",
+      ...(ownerName ? { ownerName } : {}),
+    };
     const key = JSON.stringify(dev);
-    if (lastDev && key !== lastDev) {
-      client.setDev(dev);
-      if (live.value.open) void client.newChat();
-    } else client.setDev(dev);
+    client.setDev(dev);
+    // A different brain or scenario starts a fresh chat so the next answer uses it.
+    if (lastDev && key !== lastDev && live.value.open) void client.newChat();
     lastDev = key;
   };
   apply();
   window.addEventListener("design-change", apply);
+  window.addEventListener("pg-change", apply);
 }
 
 const t0 = Date.now() - 5 * 60_000;

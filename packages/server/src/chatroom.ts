@@ -7,6 +7,7 @@ import {
   type ChatMode,
   type ChatStatus,
   type ClientMsg,
+  type DevOptions,
   type GetInTouchReason,
   type ModelTier,
   type OwnerMsg,
@@ -18,11 +19,11 @@ import {
 import { replyTag } from "./auth";
 import { OmnaraBrain } from "./brain/omnara-brain";
 import { ScriptedBrain } from "./brain/scripted-brain";
-import { BrainFailure, type Brain, type BrainState } from "./brain/types";
+import { BrainFailure, type Brain, type BrainState, type FailureKind } from "./brain/types";
 import * as db from "./db";
 import { DEMO_SITE } from "./demo-site";
 import { isDev, type Env } from "./env";
-import { inboxLink, ntfy, sendMail } from "./notify";
+import { inboxLink, ntfy, sendMail, settingsLink, type Alert, type Mail } from "./notify";
 import { latestRelease } from "./tools";
 
 /** Sent by the Worker (after checking the token) when a socket connects. */
@@ -30,12 +31,22 @@ export interface RoomInit {
   chatId: string;
   site: string;
   visitorId: string;
-  dev?: { brain?: string; scenario?: string };
+  dev?: DevOptions;
+  /** The visitor is on a dev site, a local page or the Playground. */
+  devHost?: boolean;
+  /** "City, Country" from Cloudflare. */
+  location?: string;
   page?: string;
   title?: string;
   referrer?: string;
   device?: string;
 }
+
+/** "AI failed" alerts at most this often; "unreliable" when this many answers failed within the window. */
+const FAILED_ALERT_EVERY_MS = 30 * 60_000;
+const UNRELIABLE_WINDOW_MS = 30 * 60_000;
+const UNRELIABLE_AFTER = 3;
+const UNRELIABLE_ALERT_EVERY_MS = 2 * 3600_000;
 
 interface RoomState {
   chatId: string;
@@ -56,7 +67,9 @@ interface RoomState {
   referrer?: string;
   device?: string;
   pageChanged: boolean;
-  dev?: { brain?: string; scenario?: string };
+  dev?: DevOptions;
+  devHost?: boolean;
+  location?: string;
   /** Messages exchanged while the owner had the chat; given to the AI on hand-back. */
   handBack: string[];
   /** Set while an answer is being produced; the alarm uses it to recover from an evicted object. */
@@ -73,6 +86,8 @@ export class ChatRoom extends DurableObject<Env> {
   private busy = false;
   private progress?: string;
   private abort?: AbortController;
+  /** Effective owner presence (toggle on and an inbox open), refreshed on each event. */
+  private online = false;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -99,8 +114,11 @@ export class ChatRoom extends DurableObject<Env> {
     server.serializeAttachment({ role } satisfies Socket);
 
     const settings = await db.getSettings(this.env.DB);
+    await this.refreshOnline(settings);
     this.sendTo(server, { t: "history", messages: this.messages(role === "owner"), status: this.status(settings) });
     if (role === "visitor") {
+      if (init.location) this.st.location = init.location;
+      if (init.devHost !== undefined) this.st.devHost = init.devHost;
       if (init.page && init.page !== this.st.page) {
         this.st.page = init.page;
         this.st.pageTitle = init.title;
@@ -148,6 +166,7 @@ export class ChatRoom extends DurableObject<Env> {
   private async onVisitor(ws: WebSocket, msg: ClientMsg): Promise<void> {
     const settings = await db.getSettings(this.env.DB);
     const site = await this.site();
+    if (msg.t === "send" || msg.t === "talk_to_owner") await this.refreshOnline(settings);
     switch (msg.t) {
       case "send":
         return this.onVisitorSend(ws, msg.id, msg.text, settings, site);
@@ -194,13 +213,25 @@ export class ChatRoom extends DurableObject<Env> {
 
     if (count > settings.perVisitorDailyMessages) return this.toForm("limit", settings);
     if (first && settings.alertOnNewChat) {
-      void ntfy(this.env, { title: `New chat on ${site.name}`, message: text, url: inboxLink(this.env, this.st.chatId), tags: ["speech_balloon"] });
+      this.alert(site, {
+        title: `${site.alertName ?? site.name} chat - new chat - ${this.where()}`,
+        lines: [`💬 ${quote(text)}`, `📄 ${this.st.page ?? "/"}`, `📱 ${this.st.device ?? "unknown device"}`],
+        priority: 2,
+        tags: ["speech_balloon"],
+        actions: [{ label: "Open chat", url: inboxLink(this.env, this.st.chatId) }],
+      });
     }
     if (this.st.mode === "owner") {
       this.st.handBack.push(`Visitor: ${text}`);
       await this.save();
       if (!this.ctx.getWebSockets("owner").length) {
-        void ntfy(this.env, { title: `Reply in ${site.name} chat`, message: text, url: inboxLink(this.env, this.st.chatId), priority: 4 });
+        this.alert(site, {
+          title: `${site.alertName ?? site.name} chat - ${this.who()} wrote while you're in the chat`,
+          lines: [`💬 ${quote(text)}`],
+          priority: 4,
+          tags: ["speech_balloon"],
+          actions: [{ label: "Open chat", url: inboxLink(this.env, this.st.chatId) }],
+        });
       }
       return;
     }
@@ -214,6 +245,19 @@ export class ChatRoom extends DurableObject<Env> {
       freeOnly = true;
     }
     if ((await db.spendToday(this.env.DB)) >= settings.dailyBudgetUsd) {
+      if (await db.alertDue(this.env.DB, `budget:${new Date().toISOString().slice(0, 10)}`, 86_400_000)) {
+        this.alert(site, {
+          title: `Chatbot - daily budget reached ($${settings.dailyBudgetUsd.toFixed(2)})`,
+          lines: [
+            settings.budgetAction === "get_in_touch"
+              ? `💸 New answers get "Get in touch" until midnight UTC.`
+              : `💸 Answers use the free models until midnight UTC.`,
+          ],
+          priority: 3,
+          tags: ["money_with_wings"],
+          actions: [{ label: "Open settings", url: settingsLink(this.env) }],
+        });
+      }
       if (settings.budgetAction === "get_in_touch") return this.toForm("budget", settings);
       freeOnly = true;
     }
@@ -223,7 +267,8 @@ export class ChatRoom extends DurableObject<Env> {
   // ---------- the AI turn ----------
 
   private brain(): Brain {
-    if (isDev(this.env) && this.st.dev?.brain === "scripted") return new ScriptedBrain(this.st.dev.scenario);
+    // dev options only reach the room in dev mode or for the signed-in owner (checked in /api/session).
+    if (this.st.dev?.brain === "scripted") return new ScriptedBrain(this.st.dev.scenario);
     return new OmnaraBrain(this.env);
   }
 
@@ -241,37 +286,46 @@ export class ChatRoom extends DurableObject<Env> {
     let input = this.composeInput(text);
     this.busy = true;
     this.progress = undefined;
-    this.st.turnDeadline = Date.now() + (settings.turnTimeoutSec + 30) * 1000;
+    // One time limit for the whole answer, however many models it tries.
+    const deadline = Date.now() + settings.turnTimeoutSec * 1000;
+    this.st.turnDeadline = deadline + 30_000;
     await this.save();
     await this.ctx.storage.setAlarm(this.st.turnDeadline);
     this.broadcastStatus(settings);
 
+    const failures: string[] = [];
     try {
       let attempt = 0;
-      for (const tier of tiers) {
+      tiers: for (const tier of tiers) {
         for (let retry = 0; retry < 2; retry++) {
           if (this.st.mode !== "ai") return; // the owner took over mid-answer
+          if (Date.now() >= deadline) break tiers;
           try {
-            const result = await this.runAttempt(brain, tier, `${inputId}-${attempt++}`, input, settings, site);
+            const result = await this.runAttempt(brain, tier, `${inputId}-${attempt++}`, input, settings, site, deadline);
             await this.finishTurn(result.text, result.totalCostUsd, tier, site);
             void db.recordModelSuccess(this.env.DB, tier.model);
             return;
           } catch (e) {
             if (!(e instanceof BrainFailure)) throw e;
-            console.error("turn failed", tier.model, e.kind, e.message);
+            const kind: FailureKind = Date.now() >= deadline ? "stall" : e.kind;
+            console.error("attempt failed", tier.model, kind, e.message);
+            failures.push(`${tier.label}: ${kind}`);
+            this.incident(site, "attempt_failed", `${kind}: ${e.message}`, tier.model);
             this.broadcast({ t: "delta_reset" });
             await brain.cancel(this.st.brain);
             if (e.kind !== "rejected") await db.recordModelFailure(this.env.DB, tier.model, settings);
             input = `${RETRY_NOTE}\n\nThe visitor's message: ${text}`;
-            if (e.kind === "unavailable" && retry === 0) break; // Omnara itself is failing: next tier won't help much, but try once
+            // A stalled or unreachable model rarely recovers within seconds: move to the next one.
+            if (e.kind === "stall" || e.kind === "unavailable" || e.kind === "rejected") break;
           }
         }
       }
       await this.toForm("ai_unavailable", settings);
-      void ntfy(this.env, { title: `AI failed on ${site.name}`, message: `Every model failed for: ${text}`, url: inboxLink(this.env, this.st.chatId), priority: 4, tags: ["warning"] });
+      await this.turnFailed(site, text, failures.length ? failures : ["no model answered in time"]);
     } catch (e) {
       console.error("answer", e);
       await this.toForm("ai_unavailable", settings);
+      await this.turnFailed(site, text, [...failures, `server error: ${e instanceof Error ? e.message : String(e)}`]);
     } finally {
       this.busy = false;
       this.progress = undefined;
@@ -283,14 +337,38 @@ export class ChatRoom extends DurableObject<Env> {
     }
   }
 
-  private async runAttempt(brain: Brain, tier: ModelTier, key: string, text: string, settings: Settings, site: SiteConfig) {
+  /** Logs a failed answer and alerts (throttled), plus an "unreliable" alert when failures pile up. */
+  private async turnFailed(site: SiteConfig, question: string, failures: string[]): Promise<void> {
+    await db.logIncident(this.env.DB, { site: site.key, chatId: this.st.chatId, kind: "turn_failed", detail: `${failures.join("; ")} | ${question.slice(0, 300)}` });
+    const link = inboxLink(this.env, this.st.chatId);
+    if (await db.alertDue(this.env.DB, "turn_failed", FAILED_ALERT_EVERY_MS)) {
+      this.alert(site, {
+        title: `${site.alertName ?? site.name} chat - AI failed - ${this.where()}`,
+        lines: [`❓ ${quote(question)}`, `⚠️ ${failures.join(" · ")} · visitor got the contact form`],
+        priority: 3,
+        tags: ["warning"],
+        actions: [{ label: "Open chat", url: link }],
+      });
+    }
+    const recent = await db.countIncidents(this.env.DB, "turn_failed", Date.now() - UNRELIABLE_WINDOW_MS);
+    if (recent >= UNRELIABLE_AFTER && (await db.alertDue(this.env.DB, "unreliable", UNRELIABLE_ALERT_EVERY_MS))) {
+      this.alert(site, {
+        title: `Chatbot unreliable - ${recent} failed answers in 30 min`,
+        lines: [`🚨 Latest: ${failures.join(" · ")}`, `Every failure is logged (inbox Stats and /admin/api/incidents).`],
+        priority: 4,
+        tags: ["rotating_light"],
+        actions: [{ label: "Open inbox", url: `${this.env.PUBLIC_URL}/admin/` }],
+      });
+    }
+  }
+
+  private async runAttempt(brain: Brain, tier: ModelTier, key: string, text: string, settings: Settings, site: SiteConfig, deadline: number) {
     const abort = new AbortController();
     this.abort = abort;
     let last = Date.now();
-    const started = Date.now();
     const timer = setInterval(() => {
       const now = Date.now();
-      if (now - last > settings.stallTimeoutSec * 1000 || now - started > settings.turnTimeoutSec * 1000) abort.abort();
+      if (now - last > settings.stallTimeoutSec * 1000 || now >= deadline) abort.abort();
     }, 1000);
     try {
       return await brain.turn(
@@ -369,18 +447,25 @@ export class ChatRoom extends DurableObject<Env> {
   // ---------- owner ----------
 
   private async requestOwner(reason: string, settings: Settings, site: SiteConfig): Promise<boolean> {
-    const online = settings.ownerOnline;
+    await this.refreshOnline(settings);
+    const online = this.online;
     this.st.wantsOwner = true;
     if (!online) this.st.reason = "owner_away";
     await this.save();
     this.index({ wants_owner: 1 });
     this.broadcastStatus(settings);
-    void ntfy(this.env, {
-      title: `${site.name}: a visitor wants you`,
-      message: reason || "Visitor asked for a person",
-      url: inboxLink(this.env, this.st.chatId),
+    const lastQuestion = this.rows("WHERE role = 'visitor' ORDER BY seq DESC LIMIT 1")[0]?.text;
+    this.alert(site, {
+      title: `${site.alertName ?? site.name} chat - wants you - ${this.where()}`,
+      lines: [
+        `💬 ${quote(lastQuestion ?? reason ?? "Asked for a person")}`,
+        `📄 ${this.st.page ?? "/"} · ${this.visitorMessages()} messages`,
+        `📱 ${this.st.device ?? "unknown device"}`,
+        online ? "🟢 You're online: they're waiting" : "⚪ You're offline: they got the message form",
+      ],
       priority: online ? 5 : 4,
       tags: ["raising_hand"],
+      actions: [{ label: "Open chat", url: inboxLink(this.env, this.st.chatId) }],
     });
     return online;
   }
@@ -388,6 +473,7 @@ export class ChatRoom extends DurableObject<Env> {
   private async onOwner(msg: OwnerMsg): Promise<void> {
     const settings = await db.getSettings(this.env.DB);
     const site = await this.site();
+    await this.refreshOnline(settings);
     if (msg.t === "owner_join" || (msg.t === "owner_send" && this.st.mode !== "owner")) {
       this.abort?.abort();
       await this.brain().cancel(this.st.brain);
@@ -401,12 +487,12 @@ export class ChatRoom extends DurableObject<Env> {
       if (!text || this.message(msg.id)) return;
       let emailed = false;
       if (msg.email && this.st.visitorEmail) {
-        emailed = await sendMail(this.env, {
+        emailed = await this.mail(site, {
           from: site.emailFrom,
           to: this.st.visitorEmail,
           subject: `Reply from ${site.name}`,
           text: `${text}\n\n---\nYou can reply to this email, or continue the chat on ${site.name}'s website.`,
-          replyTo: await this.replyAddress(),
+          replyTo: await this.replyAddress(site),
         });
       }
       this.add({ id: msg.id, role: "owner", text, meta: { via: "inbox", emailed } });
@@ -451,16 +537,25 @@ export class ChatRoom extends DurableObject<Env> {
     this.index({ wants_owner: 1 });
     void this.hub().enquiry(id);
     const link = inboxLink(this.env, this.st.chatId);
-    void ntfy(this.env, { title: `New message on ${site.name}`, message: `${name} <${email}>: ${message}`, url: link, priority: 4, tags: ["envelope"] });
-    const replyTo = await this.replyAddress();
-    void sendMail(this.env, {
+    this.alert(site, {
+      title: `${site.alertName ?? site.name} chat - message from ${name || email} - ${this.where()}`,
+      lines: [`✉️ ${email}`, `💬 ${quote(message, 400)}`, `📄 ${this.st.page ?? "/"} · ${Math.max(0, this.visitorMessages() - 1)} messages before this`],
+      priority: 4,
+      tags: ["envelope"],
+      actions: [
+        { label: "Open in inbox", url: link },
+        { label: "Reply by email", url: `mailto:${email}` },
+      ],
+    });
+    const replyTo = await this.replyAddress(site);
+    void this.mail(site, {
       from: site.emailFrom,
       to: site.ownerEmail,
       subject: `${site.name} chat: message from ${name || email}`,
       text: `${name} <${email}> (via ${via}):\n\n${message}\n\nOpen the chat: ${link}`,
       replyTo: email,
     });
-    void sendMail(this.env, {
+    void this.mail(site, {
       from: site.emailFrom,
       to: email,
       subject: `We got your message - ${site.name}`,
@@ -477,12 +572,13 @@ export class ChatRoom extends DurableObject<Env> {
     const body = this.messages(false)
       .map((m) => `${label(m.role, site)} (${new Date(m.at).toISOString().slice(0, 16).replace("T", " ")} UTC):\n${m.text}`)
       .join("\n\n");
-    const ok = await sendMail(this.env, { from: site.emailFrom, to: email, subject: `Your chat with ${site.name}`, text: body, replyTo: await this.replyAddress() });
+    const ok = await this.mail(site, { from: site.emailFrom, to: email, subject: `Your chat with ${site.name}`, text: body, replyTo: await this.replyAddress(site) });
     this.sendTo(ws, ok ? { t: "error", code: "transcript_sent", text: `Sent to ${email}.` } : { t: "error", code: "transcript_failed", text: "Couldn't send the email. Please try again later." });
   }
 
-  private async replyAddress(): Promise<string | undefined> {
-    if (!this.env.REPLY_DOMAIN) return undefined;
+  /** Where a visitor's email reply goes: back into this chat when reply-by-email is set up, else the site's inbox. */
+  private async replyAddress(site: SiteConfig): Promise<string | undefined> {
+    if (!this.env.REPLY_DOMAIN) return site.ownerEmail;
     return `chat+${await replyTag(this.env.TOKEN_SECRET, this.st.chatId)}@${this.env.REPLY_DOMAIN}`;
   }
 
@@ -502,7 +598,13 @@ export class ChatRoom extends DurableObject<Env> {
     await this.save();
     this.index({ mode: this.st.mode, wants_owner: 1 });
     this.broadcastStatus(await db.getSettings(this.env.DB));
-    void ntfy(this.env, { title: `Email reply on ${site.name}`, message: `${from}: ${text.slice(0, 500)}`, url: inboxLink(this.env, this.st.chatId), priority: 4, tags: ["envelope"] });
+    this.alert(site, {
+      title: `${site.alertName ?? site.name} chat - email reply from ${this.st.visitorName || from}`,
+      lines: [`💬 ${quote(text, 300)}`],
+      priority: 4,
+      tags: ["incoming_envelope"],
+      actions: [{ label: "Open chat", url: inboxLink(this.env, this.st.chatId) }],
+    });
   }
 
   async transcript(): Promise<ChatMessage[]> {
@@ -535,7 +637,7 @@ export class ChatRoom extends DurableObject<Env> {
 
   private async ensureState(init: RoomInit): Promise<void> {
     if (this.st) {
-      if (isDev(this.env) && init.dev) {
+      if (init.dev) {
         // Switching between the scripted and real brain mid-chat starts a fresh agent.
         if (init.dev.brain !== this.st.dev?.brain) this.st.brain = { lastSeq: 0 };
         this.st.dev = init.dev;
@@ -559,7 +661,9 @@ export class ChatRoom extends DurableObject<Env> {
       referrer: init.referrer,
       device: init.device,
       pageChanged: true,
-      dev: isDev(this.env) ? init.dev : undefined,
+      dev: init.dev,
+      devHost: init.devHost,
+      location: init.location,
       handBack: [],
       transcriptsSent: 0,
     };
@@ -568,10 +672,50 @@ export class ChatRoom extends DurableObject<Env> {
   }
 
   private async site(): Promise<SiteConfig> {
-    const s = await db.getSite(this.env.DB, this.st.site);
-    if (s) return s;
-    if (isDev(this.env) && this.st.site === "demo") return DEMO_SITE;
-    throw new Error(`unknown site ${this.st.site}`);
+    let s = await db.getSite(this.env.DB, this.st.site);
+    if (!s && isDev(this.env) && this.st.site === "demo") s = DEMO_SITE;
+    if (!s) throw new Error(`unknown site ${this.st.site}`);
+    // Playground: compare what the bot calls the owner.
+    return this.st.dev?.ownerName ? { ...s, ownerName: this.st.dev.ownerName } : s;
+  }
+
+  private async refreshOnline(settings: Settings): Promise<void> {
+    this.online = settings.ownerOnline && (await this.hub().ownerPresent());
+  }
+
+  /** Sends an alert without blocking the chat; a failed one is logged. */
+  private alert(site: SiteConfig, a: Alert): void {
+    const p = ntfy(this.env, site, { ...a, dev: this.st.devHost }).then((error) => {
+      if (error) return this.incidentNow(site, "alert_failed", `${a.title}: ${error}`);
+    });
+    this.ctx.waitUntil(p.catch((e) => console.error("alert", e)));
+  }
+
+  /** Sends an email; a failure is logged and returns false. */
+  private async mail(site: SiteConfig, m: Mail): Promise<boolean> {
+    const error = await sendMail(this.env, m);
+    if (error) await this.incidentNow(site, "mail_failed", `${m.subject} -> ${m.to}: ${error}`);
+    return !error;
+  }
+
+  private incident(site: SiteConfig, kind: db.IncidentKind, detail: string, model?: string): void {
+    this.ctx.waitUntil(this.incidentNow(site, kind, detail, model));
+  }
+
+  private incidentNow(site: SiteConfig, kind: db.IncidentKind, detail: string, model?: string): Promise<void> {
+    return db.logIncident(this.env.DB, { site: site.key, chatId: this.st.chatId, kind, detail, model }).catch((e) => console.error("incident", e));
+  }
+
+  private where(): string {
+    return this.st.location ?? "Unknown location";
+  }
+
+  private who(): string {
+    return this.st.visitorName || this.st.visitorEmail || "The visitor";
+  }
+
+  private visitorMessages(): number {
+    return this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM messages WHERE role = 'visitor'").one().n;
   }
 
   private save(): Promise<void> {
@@ -591,12 +735,12 @@ export class ChatRoom extends DurableObject<Env> {
     this.ctx.waitUntil(p);
   }
 
-  private status(settings: Settings): ChatStatus {
+  private status(_settings: Settings): ChatStatus {
     return {
       mode: this.st.mode,
       busy: this.busy,
       progress: this.progress,
-      ownerOnline: settings.ownerOnline,
+      ownerOnline: this.online,
       ownerJoined: this.st.ownerJoined,
       wantsOwner: this.st.wantsOwner,
       reason: this.st.mode === "form" ? this.st.reason : this.st.reason === "owner_away" ? "owner_away" : undefined,
@@ -711,6 +855,11 @@ export class ChatRoom extends DurableObject<Env> {
 
 function cap(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+function quote(text: string, max = 200): string {
+  const t = text.replace(/\s+/g, " ").trim();
+  return `"${t.length > max ? `${t.slice(0, max - 1)}…` : t}"`;
 }
 
 function label(role: Role, site?: SiteConfig): string {

@@ -46,7 +46,7 @@ export const DEFAULT_SETTINGS: Settings = {
   perVisitorDailyMessages: 40,
   maxMessageChars: 2000,
   stallTimeoutSec: 30,
-  turnTimeoutSec: 120,
+  turnTimeoutSec: 75,
   cooldownAfterFailures: 3,
   cooldownMinutes: 15,
   archiveAfterDays: 14,
@@ -126,6 +126,10 @@ export interface SiteConfig extends PublicSiteConfig {
   ownerEmail: string;
   /** Sender for emails to visitors, on a domain verified in Resend. */
   emailFrom: string;
+  /** Short name at the start of alert titles ("Portfolio chat - ..."); default: name. */
+  alertName?: string;
+  /** ntfy alerts: names of the server secrets holding the topic URL and its token (topics stay out of public repos). Default: NTFY_URL / NTFY_TOKEN. */
+  ntfy?: { urlSecret: string; tokenSecret?: string };
 }
 
 export const TOOL_NAMES = ["save_enquiry", "request_owner", "get_latest_release"] as const;

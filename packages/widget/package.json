@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --port 5290 --strictPort --host 127.0.0.1",
-    "build": "vite build",
+    "build": "vite build && vite build --mode playground",
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {

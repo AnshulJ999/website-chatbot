@@ -283,6 +283,43 @@ export async function stats(db: D1Database, days = 14) {
   return { spend: spend?.results ?? [], chats: chats?.results ?? [], enquiries: enquiries?.results ?? [], thumbs: thumbs?.results?.[0] ?? { up: 0, down: 0 } };
 }
 
+// Incidents: a durable log of failures, for alerts and later investigation.
+
+export type IncidentKind = "attempt_failed" | "turn_failed" | "alert_failed" | "mail_failed";
+
+export async function logIncident(db: D1Database, i: { site: string; chatId?: string; kind: IncidentKind; model?: string; detail: string }): Promise<void> {
+  await db
+    .prepare("INSERT INTO incidents (at, site, chat_id, kind, model, detail) VALUES (?, ?, ?, ?, ?, ?)")
+    .bind(Date.now(), i.site, i.chatId ?? null, i.kind, i.model ?? null, i.detail.slice(0, 1000))
+    .run();
+}
+
+export async function countIncidents(db: D1Database, kind: IncidentKind, since: number): Promise<number> {
+  const row = await db.prepare("SELECT COUNT(*) AS n FROM incidents WHERE kind = ? AND at >= ?").bind(kind, since).first<{ n: number }>();
+  return row?.n ?? 0;
+}
+
+export async function recentIncidents(db: D1Database, limit = 100) {
+  const { results } = await db
+    .prepare("SELECT * FROM incidents ORDER BY at DESC LIMIT ?")
+    .bind(limit)
+    .all<{ id: number; at: number; site: string; chat_id: string | null; kind: IncidentKind; model: string | null; detail: string }>();
+  return results;
+}
+
+/** True (and marks it) when the alert `key` hasn't gone out within `everyMs`. */
+export async function alertDue(db: D1Database, key: string, everyMs: number): Promise<boolean> {
+  const now = Date.now();
+  const res = await db
+    .prepare(
+      `INSERT INTO alert_marks (key, last_at) VALUES (?1, ?2)
+       ON CONFLICT(key) DO UPDATE SET last_at = ?2 WHERE alert_marks.last_at <= ?2 - ?3`,
+    )
+    .bind(key, now, everyMs)
+    .run();
+  return (res.meta.changes ?? 0) > 0;
+}
+
 export async function idleAgents(db: D1Database, olderThan: number): Promise<{ id: string; agent_id: string }[]> {
   const { results } = await db
     .prepare("SELECT id, agent_id FROM chats WHERE agent_id IS NOT NULL AND agent_archived = 0 AND updated_at < ? LIMIT 40")

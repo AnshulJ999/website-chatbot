@@ -92,7 +92,7 @@ export function Settings({ overview, onSave }: { overview: Overview; onSave: (p:
             <Num label="Messages per visitor per day" value={draft.perVisitorDailyMessages} onChange={(v) => set("perVisitorDailyMessages", v)} />
             <Num label="Longest visitor message (characters)" value={draft.maxMessageChars} step={100} onChange={(v) => set("maxMessageChars", v)} />
             <Num label="Give up on a silent answer after (seconds)" value={draft.stallTimeoutSec} onChange={(v) => set("stallTimeoutSec", v)} />
-            <Num label="Longest answer time (seconds)" value={draft.turnTimeoutSec} onChange={(v) => set("turnTimeoutSec", v)} />
+            <Num label="Time limit for a whole answer, all models included (seconds)" value={draft.turnTimeoutSec} onChange={(v) => set("turnTimeoutSec", v)} />
             <Num label="Failures before a cooldown" value={draft.cooldownAfterFailures} onChange={(v) => set("cooldownAfterFailures", v)} />
             <Num label="Cooldown length (minutes)" value={draft.cooldownMinutes} onChange={(v) => set("cooldownMinutes", v)} />
             <Num label="Archive idle chats on Omnara after (days)" value={draft.archiveAfterDays} onChange={(v) => set("archiveAfterDays", v)} />
