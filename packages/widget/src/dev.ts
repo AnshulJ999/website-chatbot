@@ -83,21 +83,50 @@ function sample(state: string): View {
   });
   const st = (p: Partial<ChatStatus>): ChatStatus => ({ ...EMPTY_STATUS, ownerOnline: true, ...p });
   const base: View = { open: true, bubble: false, messages: [], preview: "", status: st({}), conn: "open", menu: false, formDismissed: false };
+  const ask = () => msg("visitor", "Can I talk to someone?");
   switch (state) {
     case "closed":
       return { ...base, open: false };
     case "greeting":
       return { ...base, open: false, bubble: true };
+    case "welcomeback":
+      return { ...base, open: false, bubble: true, bubbleText: "Welcome back! Pick up where you left off?", messages: [q, a] };
+    case "replied":
+      return { ...base, open: false, bubble: true, bubbleText: `${cap(owner)} replied to your message`, messages: [q, a] };
+    case "loading":
+      return { ...base, loading: true };
     case "welcome":
       return base;
     case "thinking":
       return { ...base, messages: [q], status: st({ busy: true, progress: `Reading "getting started"` }) };
+    case "stillworking":
+      return { ...base, messages: [q], status: st({ busy: true, progress: "Still working on it" }) };
+    case "partial":
+      return {
+        ...base,
+        messages: [q, msg("ai", "Yes. Point it at your existing repository and it reads your snapshots and policies as they are."), msg("system", "The answer stopped early. Ask again, or talk to a person.")],
+      };
+    case "rich":
+      return {
+        ...base,
+        messages: [
+          msg("visitor", "How do I run it in Docker, and what's free?"),
+          msg("ai", "Run this on your server:\n\n```bash\ndocker run -d -p 8080:8080 -v kopialens:/data kopialens/kopialens:latest\n```\n\n| Plan | What you get |\n| --- | --- |\n| Free | Backups, restore, all the analysis |\n| Pro | The clean-up tools |\n\nSee [Running in Docker](https://example.com/docs/docker).", {
+            suggestions: ["Which port does it use?", "How do I update it?"],
+          }),
+        ],
+      };
     case "streaming":
       return { ...base, messages: [q], preview: "Yes. Point it at your existing repository and it reads your snapshots", status: st({ busy: true }) };
     case "answer":
       return { ...base, messages: [q, a] };
     case "asking":
-      return { ...base, messages: [q, a, msg("visitor", "Can I talk to someone?")], status: st({ wantsOwner: true }) };
+      return { ...base, messages: [q, a, ask()], status: st({ wantsOwner: true }) };
+    case "handback":
+      return {
+        ...base,
+        messages: [q, a, ask(), msg("system", `${cap(owner)} joined the chat`), msg("owner", "Hi! Happy to help. What are you trying to set up?"), msg("system", `${cap(owner)} has left the chat. You're chatting with the AI assistant.`)],
+      };
     case "joined":
       return {
         ...base,
@@ -116,10 +145,26 @@ function sample(state: string): View {
       };
     case "limit":
       return { ...base, messages: [q, a], status: st({ mode: "form", reason: "limit" }) };
+    case "aioff":
+      return { ...base, messages: [q], status: st({ mode: "form", reason: "ai_off" }) };
+    case "reconnecting":
+      return { ...base, messages: [q, a], conn: "reconnecting" };
     case "unavailable":
       return { ...base, conn: "unreachable" };
     case "menu":
       return { ...base, messages: [q, a], menu: true };
+    case "emailing":
+      return { ...base, messages: [q, a], menu: true, sampleEmailing: true };
+    case "past":
+      return {
+        ...base,
+        messages: [q, a],
+        samplePast: [
+          { id: "p1", preview: "Visitor: Does it work with an existing Kopia repository?", updatedAt: Date.now() - 3_600_000 },
+          { id: "p2", preview: "Visitor: Can I get a refund on the lifetime licence?", updatedAt: Date.now() - 2 * 86_400_000, ownerAt: Date.now() - 86_400_000 },
+          { id: "p3", preview: "Visitor: Which download do I need for my NAS?", updatedAt: Date.now() - 9 * 86_400_000 },
+        ],
+      };
     default:
       return base;
   }

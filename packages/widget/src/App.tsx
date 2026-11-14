@@ -130,8 +130,8 @@ function Panel({ client, site: s, v, closing, onClose }: { client: ChatClient; s
 
       {v.menu && <Menu client={client} site={s} v={v} onPast={setPast} />}
 
-      {past ? (
-        <PastChats client={client} chats={past} onBack={() => setPast(null)} />
+      {past ?? v.samplePast ? (
+        <PastChats client={client} chats={(past ?? v.samplePast)!} onBack={() => setPast(null)} />
       ) : (
         <>
           {talkVisible && u.talkPlacement === "bar" && <TalkBar client={client} site={s} v={v} />}
@@ -219,7 +219,7 @@ function PastChats({ client, chats, onBack }: { client: ChatClient; chats: PastC
 }
 
 function Menu({ client, site: s, v, onPast }: { client: ChatClient; site: PublicSiteConfig; v: View; onPast: (chats: PastChat[]) => void }) {
-  const [emailing, setEmailing] = useState(false);
+  const [emailing, setEmailing] = useState(!!v.sampleEmailing);
   const [email, setEmail] = useState(v.status.visitorEmail ?? "");
   const u = ui.value;
   const close = () => setView({ menu: false });
