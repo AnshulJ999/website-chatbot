@@ -11,4 +11,5 @@ packages/server/public/widget/
 packages/server/public/admin/
 devnotes/
 .deploy.vars
+.sync.vars
 packages/server/public/playground/

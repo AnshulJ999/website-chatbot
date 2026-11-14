@@ -136,9 +136,17 @@ export interface ChatSummary {
   referrer?: string;
   country?: string;
   city?: string;
+  region?: string;
   device?: string;
   email?: string;
   name?: string;
+  /** The visitor's number on this site, given on their first message. */
+  visitorNumber?: number;
+  /** How many chats this visitor has had (with messages). */
+  visitorChats?: number;
+  /** Started from the owner's test pages (Playground, scripts, dev sites). */
+  test: boolean;
+  archived: boolean;
   unread: number;
   createdAt: number;
   updatedAt: number;

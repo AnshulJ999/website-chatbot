@@ -7,7 +7,8 @@
     "kb-sync": "./sync.ts"
   },
   "scripts": {
-    "start": "node sync.ts"
+    "start": "node sync.ts",
+    "live": "node sync.ts --live"
   },
   "engines": {
     "node": ">=23.6"
@@ -18,6 +19,7 @@
   "dependencies": {
     "@joplin/turndown-plugin-gfm": "^1.0.71",
     "linkedom": "^0.18.15",
-    "turndown": "^7.2.5"
+    "turndown": "^7.2.5",
+    "undici": "^7.30.1"
   }
 }

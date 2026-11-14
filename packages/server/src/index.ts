@@ -8,6 +8,8 @@ import * as db from "./db";
 import { DEMO_SITE } from "./demo-site";
 import { isDev, type Env } from "./env";
 import { ntfy } from "./notify";
+import { buildInstruction } from "./brain/agent-config";
+import { deviceLine, placeLine } from "./visitor-info";
 
 export { ChatRoom } from "./chatroom";
 export { Hub } from "./hub";
@@ -52,17 +54,19 @@ function isDevOrigin(env: Env, origin: string | undefined): boolean {
 
 const REGIONS = new Intl.DisplayNames(["en"], { type: "region" });
 
-function cfInfo(c: Context<App>): { country?: string; city?: string; ip: string | null; location: string } {
-  const cf = (c.req.raw as Request & { cf?: { country?: string; city?: string } }).cf;
+function cfInfo(c: Context<App>): { country?: string; city?: string; region?: string; ip: string | null; location: string } {
+  const cf = (c.req.raw as Request & { cf?: { country?: string; city?: string; region?: string } }).cf;
   let countryName = cf?.country ?? "";
   try {
     if (countryName && countryName !== "XX" && countryName !== "T1") countryName = REGIONS.of(countryName) ?? countryName;
   } catch {
     // unknown code: keep it
   }
-  const location = [cf?.city, countryName].filter(Boolean).join(", ") || "Unknown location";
-  return { country: cf?.country, city: cf?.city, ip: c.req.header("CF-Connecting-IP") ?? null, location };
+  const location = placeLine({ city: cf?.city, region: cf?.region, country: countryName });
+  return { country: cf?.country, city: cf?.city, region: cf?.region, ip: c.req.header("CF-Connecting-IP") ?? null, location };
 }
+
+const deviceOf = (c: Context<App>) => deviceLine(c.req.header("User-Agent") ?? "", c.req.header("Accept-Language"));
 
 /** Whether visitors see the owner as online (the inbox's presence setting and, in "auto", recent activity). */
 function ownerOnline(env: Env): Promise<boolean> {
@@ -85,7 +89,7 @@ app.post("/api/session", async (c) => {
   if (!site) return c.json({ error: "unknown_site" }, 404);
   if (!originAllowed(env, site, c.req.header("Origin"))) return c.json({ error: "origin" }, 403);
 
-  const { country, city, ip } = cfInfo(c);
+  const { country, city, region, ip } = cfInfo(c);
   // Playground options: always locally, and on the deployed server for the signed-in owner only.
   const devOk = isDev(env) || (await verifyOwnerPass(env.TOKEN_SECRET, body.dev?.pass));
   let visitorId = body.visitorId && /^v_[\w]+$/.test(body.visitorId) ? body.visitorId : undefined;
@@ -106,9 +110,7 @@ app.post("/api/session", async (c) => {
   if (!chatId && !body.newChat) chatId = (await db.visitorLastChat(env.DB, vid)) ?? undefined;
   chatId ??= newId("c");
 
-  const d = body.device ?? { width: 0, touch: false, lang: "", tz: "" };
-  const device = `${d.touch ? "touch" : "mouse"} · ${d.width}px · ${d.lang} · ${d.tz}`.slice(0, 120);
-  await db.upsertVisitor(env.DB, { id: vid, site: site.key, country, city, device });
+  await db.upsertVisitor(env.DB, { id: vid, site: site.key, country, city, region, device: deviceOf(c) });
 
   const settings = await db.getSettings(env.DB);
   // The daily clean-up rides on the first chat of the day, so no cron trigger is needed (Workers Free allows 5 per account).
@@ -173,11 +175,12 @@ app.get("/api/chat/ws", async (c) => {
     visitorId: t.visitorId,
     dev: t.dev,
     devHost: isDevOrigin(env, origin),
+    test: !!t.dev || isDevOrigin(env, origin),
     location: cfInfo(c).location,
     page: q.page?.slice(0, 500),
     title: q.title?.slice(0, 200),
     referrer: q.ref?.slice(0, 500) || undefined,
-    device: q.device?.slice(0, 120),
+    device: deviceOf(c),
   };
   const headers = new Headers(c.req.raw.headers);
   headers.set("X-Init", encodeURIComponent(JSON.stringify(init)));
@@ -217,20 +220,17 @@ app.get("/api/dev-pass", async (c) => {
   return c.json({ pass: await makeOwnerPass(c.env.TOKEN_SECRET, 1) });
 });
 
-/** Sends a test alert to a site's ntfy topic, to check delivery from Cloudflare. */
+/** Sends a test alert to a site's chat topic and to the system topic, to check delivery from Cloudflare. */
 app.post("/api/test-alert/:key", async (c) => {
   if (!bearer(c)) return c.text("unauthorized", 401);
   const site = await siteFor(c.env, c.req.param("key"));
   if (!site) return c.json({ error: "unknown_site" }, 404);
-  const error = await ntfy(c.env, site, {
-    title: `${site.alertName ?? site.name} chat - test alert`,
-    lines: ["🔔 Sent from the chatbot server to check that alerts arrive."],
-    priority: 2,
-    tags: ["bell"],
-    actions: [{ label: "Open inbox", url: `${c.env.PUBLIC_URL}/admin/` }],
-    dev: true,
-  });
-  return c.json({ ok: !error, error });
+  const base = { lines: ["🔔 Sent from the chatbot server to check that alerts arrive."], priority: 2 as const, tags: ["bell"], actions: [{ label: "Open inbox", url: `${c.env.PUBLIC_URL}/admin/` }] };
+  const [chat, ops] = await Promise.all([
+    ntfy(c.env, site, { ...base, title: `${site.alertName ?? site.name} chat - Test alert` }),
+    ntfy(c.env, null, { ...base, title: "Chatbot - Test alert" }),
+  ]);
+  return c.json({ ok: !chat && !ops, chat, ops });
 });
 
 app.get("/api/summary", async (c) => {
@@ -243,7 +243,7 @@ async function summary(env: Env) {
   const [settings, spend, stats, enquiries, chats, failedAnswers, failedAttempts, cutOffAnswers, failedAlerts, failedMails, answers24h] = await Promise.all([
     db.getSettings(env.DB),
     db.spendToday(env.DB),
-    db.stats(env.DB, 7),
+    db.getSettings(env.DB).then((s) => db.stats(env.DB, 7, s.countTestChats)),
     db.listEnquiries(env.DB, 20),
     db.listChats(env.DB, { limit: 20 }),
     db.countIncidents(env.DB, "turn_failed", day),
@@ -251,7 +251,7 @@ async function summary(env: Env) {
     db.countIncidents(env.DB, "turn_interrupted", day),
     db.countIncidents(env.DB, "alert_failed", day),
     db.countIncidents(env.DB, "mail_failed", day),
-    db.answerStats(env.DB, day),
+    db.getSettings(env.DB).then((s) => db.answerStats(env.DB, day, s.countTestChats)),
   ]);
   return {
     aiEnabled: settings.aiEnabled,
@@ -297,9 +297,27 @@ app.patch("/admin/api/settings", async (c) => {
   return c.json(settings);
 });
 
+/** The whole prompt a site's agents get, for checking it in the inbox. */
+app.get("/admin/api/prompt/:key", async (c) => {
+  const site = await siteFor(c.env, c.req.param("key"));
+  if (!site) return c.json({ error: "unknown_site" }, 404);
+  const prompt = buildInstruction(site);
+  return c.json({ prompt, tokensApprox: Math.round(prompt.length / 3.5) });
+});
+
+/** Archive or restore one chat; nothing is deleted. */
+app.post("/admin/api/chats/:id/archive", async (c) => {
+  const { archived } = await c.req.json<{ archived?: boolean }>();
+  await db.setArchived(c.env.DB, c.req.param("id"), archived !== false);
+  await hub(c.env).chat(c.req.param("id"));
+  return c.json({ ok: true });
+});
+
+app.post("/admin/api/archive-test-chats", async (c) => c.json({ archived: await db.archiveTestChats(c.env.DB) }));
+
 app.get("/admin/api/chats", async (c) => {
   const q = c.req.query();
-  const filter = (["all", "live", "wants", "email"] as const).find((f) => f === q.filter) ?? "all";
+  const filter = (["all", "live", "wants", "email", "test", "archived"] as const).find((f) => f === q.filter) ?? "all";
   return c.json(await db.listChats(c.env.DB, { site: q.site || undefined, filter, before: q.before ? Number(q.before) : undefined }));
 });
 
@@ -341,7 +359,8 @@ app.patch("/admin/api/enquiries/:id", async (c) => {
 
 app.get("/admin/api/stats", async (c) => {
   const days = Math.min(Number(c.req.query("days") ?? 14), 90);
-  return c.json(await db.stats(c.env.DB, days));
+  const settings = await db.getSettings(c.env.DB);
+  return c.json(await db.stats(c.env.DB, days, settings.countTestChats));
 });
 
 app.get("/admin/api/summary", async (c) => c.json(await summary(c.env)));
@@ -351,7 +370,8 @@ const EFFORTS = ["max", "xhigh", "high", "medium", "low", "none", ""];
 function sanitizeSettings(p: Partial<Settings>): Partial<Settings> {
   const out: Partial<Settings> = {};
   const num = (v: unknown, min: number, max: number) => (typeof v === "number" && Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : undefined);
-  for (const k of ["aiEnabled", "streaming", "alertOnNewChat"] as const) if (typeof p[k] === "boolean") out[k] = p[k];
+  for (const k of ["aiEnabled", "streaming", "alertOnNewChat", "countTestChats"] as const) if (typeof p[k] === "boolean") out[k] = p[k];
+  if (p.visitorLabel === "number" || p.visitorLabel === "code" || p.visitorLabel === "name") out.visitorLabel = p.visitorLabel;
   if (p.presence === "auto" || p.presence === "available" || p.presence === "away") out.presence = p.presence;
   const ranges: [keyof Settings, number, number][] = [
     ["chatCapUsd", 0, 100],

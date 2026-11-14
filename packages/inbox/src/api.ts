@@ -45,6 +45,9 @@ export const api = {
   enquiries: () => call<Enquiry[]>("GET", "/enquiries"),
   enquiryStatus: (id: string, status: Enquiry["status"]) => call("PATCH", `/enquiries/${id}`, { status }),
   stats: (days: number) => call<Stats>("GET", `/stats?days=${days}`),
+  archive: (id: string, archived: boolean) => call("POST", `/chats/${id}/archive`, { archived }),
+  archiveTestChats: () => call<{ archived: number }>("POST", "/archive-test-chats"),
+  prompt: (site: string) => call<{ prompt: string; tokensApprox: number }>("GET", `/prompt/${encodeURIComponent(site)}`),
 };
 
 const wsUrl = (path: string) => `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${BASE}${path}`;

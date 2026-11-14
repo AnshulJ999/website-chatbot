@@ -7,7 +7,7 @@ import { Enquiries } from "./Enquiries";
 import { allowIdleDetection, idleDetectionState, notify, trackActivity } from "./presence";
 import { Settings } from "./Settings";
 import { Stats } from "./Stats";
-import { ErrorLine, Toggle } from "./ui";
+import { ErrorLine } from "./ui";
 
 type Route = { page: "chats"; id?: string } | { page: "enquiries" } | { page: "stats" } | { page: "settings" };
 
@@ -143,7 +143,11 @@ export function App() {
         {s && (
           <div className="mt-auto space-y-3 border-t border-border px-4 py-3">
             <PresenceControl settings={s} online={online} onSave={saveSettings} />
-            <Toggle label="AI answers" hint={s.aiEnabled ? "On" : "Off: visitors see Get in touch"} checked={s.aiEnabled} onChange={(v) => void saveSettings({ aiEnabled: v })} />
+            {!s.aiEnabled && (
+              <a href="#/settings" className="block text-xs text-warn underline">
+                AI answers are off
+              </a>
+            )}
             <p className="text-xs text-muted-fg tabular">
               Today {usd(overview.spendTodayUsd)} of {usd(s.dailyBudgetUsd)}
             </p>
@@ -157,7 +161,7 @@ export function App() {
             <ErrorLine error={error} />
           </div>
         )}
-        {route.page === "chats" && <Chats selected={route.id} sites={overview?.sites ?? []} event={chatEvent} />}
+        {route.page === "chats" && <Chats selected={route.id} sites={overview?.sites ?? []} event={chatEvent} labelStyle={s?.visitorLabel ?? "number"} />}
         {route.page === "enquiries" && <Enquiries tick={enquiryTick} sites={overview?.sites ?? []} />}
         {route.page === "stats" && <Stats sites={overview?.sites ?? []} />}
         {route.page === "settings" && overview && <Settings overview={overview} onSave={saveSettings} />}

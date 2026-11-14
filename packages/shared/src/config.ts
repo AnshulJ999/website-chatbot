@@ -1,3 +1,5 @@
+import type { VisitorLabel } from "./visitor";
+
 /** One step of the model ladder. `provider` is an Omnara provider config name. */
 export interface ModelTier {
   provider: string;
@@ -43,6 +45,10 @@ export interface Settings {
   cooldownMinutes: number;
   archiveAfterDays: number;
   alertOnNewChat: boolean;
+  /** How visitors without a name or email are labelled in the inbox and alerts. */
+  visitorLabel: VisitorLabel;
+  /** Include test chats (owner pass, dev sites) in Stats and the Sitrep. */
+  countTestChats: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -70,6 +76,8 @@ export const DEFAULT_SETTINGS: Settings = {
   cooldownMinutes: 15,
   archiveAfterDays: 14,
   alertOnNewChat: false,
+  visitorLabel: "number",
+  countTestChats: true,
 };
 
 /** How AI answers went over a period (times in ms). */
@@ -164,6 +172,8 @@ export interface SiteConfig extends PublicSiteConfig {
   storeName: string;
   /** The site's own agent instruction (AGENTS.md-style). */
   instruction: string;
+  /** One line per page (title, address, store path), built by kb-sync; part of every chat's prompt. */
+  siteMap?: string;
   /** Custom tools this site enables, from TOOL_NAMES. */
   tools: string[];
   /** owner/repo for get_latest_release. */

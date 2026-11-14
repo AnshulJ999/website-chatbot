@@ -1,0 +1,17 @@
+# Settings for `npm run sync:live -- <site>/chatbot/chatbot.config.json`. Copy to .sync.vars (git-ignored).
+
+# Omnara: the key the server uses, and the project holding the knowledge stores.
+OMNARA_API_KEY=
+OMNARA_ORG_ID=
+OMNARA_PROJECT_ID=
+
+# The deployed chat server and its API token (same as the server's API_TOKEN secret).
+CHATBOT_SERVER=https://chat.example.com
+API_TOKEN=
+
+# Optional: reach the server at this IP when local DNS sends its name elsewhere.
+CHATBOT_SERVER_IP=
+
+# Optional: where --alert reports a failed sync (an ntfy topic URL and token).
+NTFY_URL=
+NTFY_TOKEN=

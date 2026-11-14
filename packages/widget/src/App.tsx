@@ -295,6 +295,7 @@ function Messages({ client, site: s, v, formReason }: { client: ChatClient; site
         const el = e.currentTarget;
         pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
       }}
+      onClick={copyCode}
       aria-live="polite"
     >
       {v.conn === "unreachable" ? (
@@ -305,7 +306,7 @@ function Messages({ client, site: s, v, formReason }: { client: ChatClient; site
           {v.messages.map((m) => (
             <Message key={m.id} m={m} site={s} client={client} />
           ))}
-          {st.busy && (preview ? <div class="msg ai streaming" dangerouslySetInnerHTML={{ __html: renderMarkdown(preview) }} /> : <Thinking text={st.progress} />)}
+          {st.busy && (preview ? <div class="msg ai streaming" dangerouslySetInnerHTML={{ __html: renderMarkdown(preview, MD) }} /> : <Thinking text={st.progress} />)}
           {st.wantsOwner && st.ownerOnline && !st.ownerJoined && st.mode === "ai" && (
             <p class="system">Asked {s.ownerName} to join. You can keep chatting meanwhile.</p>
           )}
@@ -352,7 +353,7 @@ function Welcome({ client, site: s, v }: { client: ChatClient; site: PublicSiteC
         </p>
       )}
       {!hasChat && v.status.mode === "ai" && starters.length > 0 && (
-        <div class="suggestions suggestions-chips starters">
+        <div class={`suggestions suggestions-${u.suggestions} starters`}>
           {starters.map((t) => (
             <button
               key={t}
@@ -378,8 +379,8 @@ function Message({ m, site: s, client }: { m: ChatMessage; site: PublicSiteConfi
   return (
     <div class={`msg-wrap ${m.role}`}>
       {isOwner && <span class="who">{cap(s.ownerName)}</span>}
-      <div class={`msg ${m.role}`} dangerouslySetInnerHTML={{ __html: renderMarkdown(m.text) }} />
-      <div class="thumbs">
+      <div class={`msg ${m.role}`} dangerouslySetInnerHTML={{ __html: renderMarkdown(m.text, MD) }} />
+      <div class={`thumbs ${m.feedback ? "rated" : ""}`}>
         <CopyButton text={m.text} />
         {!isOwner && (
           <>
@@ -393,6 +394,22 @@ function Message({ m, site: s, client }: { m: ChatMessage; site: PublicSiteConfi
         )}
       </div>
     </div>
+  );
+}
+
+const MD = { copyButtons: true };
+
+/** Copy buttons on code blocks inside answers (rendered as HTML, so handled here by delegation). */
+function copyCode(e: MouseEvent): void {
+  const btn = (e.target as HTMLElement).closest?.(".code-copy") as HTMLButtonElement | null;
+  const code = btn?.parentElement?.querySelector("code")?.textContent;
+  if (!btn || code == null) return;
+  void navigator.clipboard?.writeText(code).then(
+    () => {
+      btn.textContent = "Copied";
+      setTimeout(() => (btn.textContent = "Copy"), 1500);
+    },
+    () => undefined,
   );
 }
 

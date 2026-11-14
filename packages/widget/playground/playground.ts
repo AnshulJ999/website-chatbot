@@ -38,7 +38,9 @@ const PF_MAP: ThemeMap = {
 type Opt = { id: string; label: string };
 const opt = (id: string, label: string): Opt => ({ id, label });
 
-const SITES = [opt("kopialens", "KopiaLens"), opt("portfolio", "Portfolio"), opt("demo", "Demo")];
+// The demo site exists only on a local dev server.
+const LOCAL = ["localhost", "127.0.0.1"].includes(location.hostname);
+const SITES = [opt("kopialens", "KopiaLens"), opt("portfolio", "Portfolio"), ...(LOCAL ? [opt("demo", "Demo")] : [])];
 const KL_THEMES = [opt("kl-dark", "KopiaLens dark"), opt("kl-light", "KopiaLens light")];
 const PF_THEMES = [
   opt("pf-light", "Light"),
@@ -159,9 +161,13 @@ function applyPg(): void {
   const fromUrl = new URLSearchParams(location.search).get("site");
   if (fromUrl && SITES.some((s) => s.id === fromUrl)) setPg("site", fromUrl, true);
   for (const k of PG_KEYS) root.setAttribute(`data-pg-${k}`, readPg(k));
+  root.setAttribute("data-pg-site", site());
 }
 
-const site = () => root.dataset.pgSite || "kopialens";
+const site = () => {
+  const s = root.dataset.pgSite;
+  return s && SITES.some((o) => o.id === s) ? s : "kopialens";
+};
 const themesFor = (s: string) => (s === "kopialens" ? KL_THEMES : s === "portfolio" ? PF_THEMES : ALL_THEMES);
 const defaultTheme = (s: string) => (s === "portfolio" ? "pf-light" : "kl-dark");
 const theme = () => {

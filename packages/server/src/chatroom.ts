@@ -15,6 +15,7 @@ import {
   type ServerMsg,
   type Settings,
   type SiteConfig,
+  visitorLabel,
 } from "@website-chatbot/shared";
 import { replyTag } from "./auth";
 import { OmnaraBrain } from "./brain/omnara-brain";
@@ -25,6 +26,7 @@ import { DEMO_SITE } from "./demo-site";
 import { isDev, type Env } from "./env";
 import { inboxLink, ntfy, sendMail, settingsLink, type Alert, type Mail } from "./notify";
 import { latestRelease } from "./tools";
+import { referrerLine } from "./visitor-info";
 
 /** Sent by the Worker (after checking the token) when a socket connects. */
 export interface RoomInit {
@@ -34,7 +36,9 @@ export interface RoomInit {
   dev?: DevOptions;
   /** The visitor is on a dev site, a local page or the Playground. */
   devHost?: boolean;
-  /** "City, Country" from Cloudflare. */
+  /** Started from the owner's test pages (owner pass or a dev site): tagged, alerts go to the system topic. */
+  test?: boolean;
+  /** "City, Region, Country" from Cloudflare. */
   location?: string;
   page?: string;
   title?: string;
@@ -42,11 +46,12 @@ export interface RoomInit {
   device?: string;
 }
 
-/** "AI failed" alerts at most this often; "unreliable" when this many answers failed within the window. */
+/** "AI failed" alerts at most this often; a "many failures" alert when this many answers failed within the window. */
 const FAILED_ALERT_EVERY_MS = 30 * 60_000;
 const UNRELIABLE_WINDOW_MS = 30 * 60_000;
 const UNRELIABLE_AFTER = 3;
 const UNRELIABLE_ALERT_EVERY_MS = 2 * 3600_000;
+const STATS_LINK = (env: Env) => `${env.PUBLIC_URL}/admin/#/stats`;
 
 interface RoomState {
   chatId: string;
@@ -69,6 +74,8 @@ interface RoomState {
   pageChanged: boolean;
   dev?: DevOptions;
   devHost?: boolean;
+  test?: boolean;
+  visitorNumber?: number;
   location?: string;
   /** Messages exchanged while the owner had the chat; given to the AI on hand-back. */
   handBack: string[];
@@ -245,13 +252,17 @@ export class ChatRoom extends DurableObject<Env> {
 
     const count = await db.countVisitorMessage(this.env.DB, this.st.visitorId);
     const first = this.st.seq === 0 || !this.hasRole("visitor");
+    if (first && !this.st.visitorNumber) {
+      this.st.visitorNumber = (await db.assignVisitorNumber(this.env.DB, this.st.visitorId)) ?? undefined;
+      await this.save();
+    }
     this.add({ id, role: "visitor", text, meta: { via: "widget" } });
 
     if (count > settings.perVisitorDailyMessages) return this.toForm("limit", settings);
     if (first && settings.alertOnNewChat) {
       this.alert(site, {
-        title: `${site.alertName ?? site.name} chat - new chat - ${this.where()}`,
-        lines: [`💬 ${quote(text)}`, `📄 ${this.st.page ?? "/"}`, `📱 ${this.st.device ?? "unknown device"}`],
+        title: `${siteTag(site)} - ${this.label(settings)} - ${this.where()}`,
+        lines: [`💬 ${quote(text)}`, `📄 ${this.st.page ?? "/"}`, `🔗 ${referrerLine(this.st.referrer, site.origins)}`, `📱 ${this.device()}`],
         priority: 2,
         tags: ["speech_balloon"],
         actions: [{ label: "Open chat", url: inboxLink(this.env, this.st.chatId) }],
@@ -262,9 +273,9 @@ export class ChatRoom extends DurableObject<Env> {
       await this.save();
       if (!this.ctx.getWebSockets("owner").length) {
         this.alert(site, {
-          title: `${site.alertName ?? site.name} chat - ${this.who()} wrote while you're in the chat`,
+          title: `${siteTag(site)} - ${this.who(settings)} replied`,
           lines: [`💬 ${quote(text)}`],
-          priority: 4,
+          priority: 3,
           tags: ["speech_balloon"],
           actions: [{ label: "Open chat", url: inboxLink(this.env, this.st.chatId) }],
         });
@@ -282,17 +293,21 @@ export class ChatRoom extends DurableObject<Env> {
     }
     if ((await db.spendToday(this.env.DB)) >= settings.dailyBudgetUsd) {
       if (await db.alertDue(this.env.DB, `budget:${new Date().toISOString().slice(0, 10)}`, 86_400_000)) {
-        this.alert(site, {
-          title: `Chatbot - daily budget reached ($${settings.dailyBudgetUsd.toFixed(2)})`,
-          lines: [
-            settings.budgetAction === "get_in_touch"
-              ? `💸 New answers get "Get in touch" until midnight UTC.`
-              : `💸 Answers use the free models until midnight UTC.`,
-          ],
-          priority: 3,
-          tags: ["money_with_wings"],
-          actions: [{ label: "Open settings", url: settingsLink(this.env) }],
-        });
+        this.alert(
+          site,
+          {
+            title: `Chatbot - daily budget reached ($${settings.dailyBudgetUsd.toFixed(2)})`,
+            lines: [
+              settings.budgetAction === "get_in_touch"
+                ? `💸 New answers get "Get in touch" until midnight UTC.`
+                : `💸 Answers use the free models until midnight UTC.`,
+            ],
+            priority: 4,
+            tags: ["money_with_wings"],
+            actions: [{ label: "Open settings", url: settingsLink(this.env) }],
+          },
+          true,
+        );
       }
       if (settings.budgetAction === "get_in_touch") return this.toForm("budget", settings);
       freeOnly = true;
@@ -498,7 +513,7 @@ export class ChatRoom extends DurableObject<Env> {
     }
   }
 
-  /** Logs a cut-off answer, alerts (throttled) and feeds the "unreliable" check. */
+  /** Logs a cut-off answer (no alert: it recovers itself and shows in Stats) and feeds the failures check. */
   private async interrupted(site: SiteConfig, tier: ModelTier | undefined, question: string, trigger: string): Promise<void> {
     await db.logIncident(this.env.DB, {
       site: site.key,
@@ -507,49 +522,61 @@ export class ChatRoom extends DurableObject<Env> {
       model: tier?.model,
       detail: `found on ${trigger}, recovery ${this.st.recoveries ?? 1} | ${question.slice(0, 300)}`,
     });
-    if (await db.alertDue(this.env.DB, "turn_interrupted", FAILED_ALERT_EVERY_MS)) {
-      this.alert(site, {
-        title: `${site.alertName ?? site.name} chat - answer cut off - ${this.where()}`,
-        lines: [`❓ ${quote(question || "unknown question")}`, `✂️ Cloudflare stopped the answer (${tier?.label ?? "unknown model"}); recovering it without streaming`],
-        priority: 3,
-        tags: ["scissors"],
-        actions: [{ label: "Open chat", url: inboxLink(this.env, this.st.chatId) }],
-      });
-    }
-    await this.checkUnreliable(site, `answer cut off (${tier?.label ?? "unknown model"})`);
+    await this.checkUnreliable(site);
   }
 
-  /** "Unreliable" alert when failed or cut-off answers pile up within the window. */
-  private async checkUnreliable(site: SiteConfig, latest: string): Promise<void> {
+  /** One "many failures" alert when failed answers pile up within the window: counts by model and site, latest question. */
+  private async checkUnreliable(site: SiteConfig): Promise<void> {
     const since = Date.now() - UNRELIABLE_WINDOW_MS;
-    const [failed, cut] = await Promise.all([
-      db.countIncidents(this.env.DB, "turn_failed", since),
-      db.countIncidents(this.env.DB, "turn_interrupted", since),
-    ]);
-    if (failed + cut < UNRELIABLE_AFTER || !(await db.alertDue(this.env.DB, "unreliable", UNRELIABLE_ALERT_EVERY_MS))) return;
-    this.alert(site, {
-      title: `Chatbot unreliable - ${failed} failed and ${cut} cut-off answers in 30 min`,
-      lines: [`🚨 Latest: ${latest}`, `Every failure is logged (inbox Stats and /admin/api/incidents).`],
-      priority: 4,
-      tags: ["rotating_light"],
-      actions: [{ label: "Open inbox", url: `${this.env.PUBLIC_URL}/admin/` }],
-    });
+    const rows = await db.incidentsSince(this.env.DB, ["turn_failed", "turn_interrupted"], since);
+    if (rows.length < UNRELIABLE_AFTER || !(await db.alertDue(this.env.DB, "unreliable", UNRELIABLE_ALERT_EVERY_MS))) return;
+    const failed = rows.filter((r) => r.kind === "turn_failed");
+    const cut = rows.length - failed.length;
+    const causes = new Map<string, number>();
+    for (const r of failed) {
+      for (const f of (r.detail.split(" | ")[0] ?? "").split("; ").filter(Boolean)) causes.set(f, (causes.get(f) ?? 0) + 1);
+    }
+    const sites = new Map<string, number>();
+    for (const r of rows) sites.set(r.site, (sites.get(r.site) ?? 0) + 1);
+    const siteNames = await Promise.all([...sites].map(async ([key, n]) => `${(await db.getSite(this.env.DB, key))?.name ?? key} ${n}`));
+    const latestQ = rows[0]?.detail.split(" | ").slice(1).join(" | ");
+    this.alert(
+      site,
+      {
+        title: `Chatbot - ${failed.length} failed answers in 30 min`,
+        lines: [
+          causes.size ? `⚠️ ${[...causes].map(([f, n]) => `${f} ×${n}`).join(" · ")}` : "",
+          cut ? `✂️ ${cut} answer${cut === 1 ? "" : "s"} cut off` : "",
+          `🌐 ${siteNames.join(" · ")}`,
+          latestQ ? `❓ Latest: ${quote(latestQ)}` : "",
+        ],
+        priority: 4,
+        tags: ["rotating_light"],
+        actions: [{ label: "Open Stats", url: STATS_LINK(this.env) }],
+      },
+      true,
+    );
   }
 
-  /** Logs a failed answer and alerts (throttled), plus an "unreliable" alert when failures pile up. */
+  /** Logs a failed answer and alerts (throttled), plus a "many failures" alert when failures pile up. */
   private async turnFailed(site: SiteConfig, question: string, failures: string[]): Promise<void> {
     await db.logIncident(this.env.DB, { site: site.key, chatId: this.st.chatId, kind: "turn_failed", detail: `${failures.join("; ")} | ${question.slice(0, 300)}` });
     const link = inboxLink(this.env, this.st.chatId);
     if (await db.alertDue(this.env.DB, "turn_failed", FAILED_ALERT_EVERY_MS)) {
-      this.alert(site, {
-        title: `${site.alertName ?? site.name} chat - AI failed - ${this.where()}`,
-        lines: [`❓ ${quote(question)}`, `⚠️ ${failures.join(" · ")} · visitor got the contact form`],
-        priority: 3,
-        tags: ["warning"],
-        actions: [{ label: "Open chat", url: link }],
-      });
+      const settings = await db.getSettings(this.env.DB);
+      this.alert(
+        site,
+        {
+          title: `Chatbot - AI failed - ${site.name}`,
+          lines: [`❓ ${quote(question)}`, `⚠️ ${failures.join(" · ")}`, `👤 ${this.who(settings)} got the contact form`],
+          priority: 2,
+          tags: ["warning"],
+          actions: [{ label: "Open chat", url: link }],
+        },
+        true,
+      );
     }
-    await this.checkUnreliable(site, failures.join(" · "));
+    await this.checkUnreliable(site);
   }
 
   private async runAttempt(brain: Brain, tier: ModelTier, key: string, text: string, settings: Settings, site: SiteConfig, deadline: number, resume = false) {
@@ -691,14 +718,15 @@ export class ChatRoom extends DurableObject<Env> {
     this.broadcastStatus(settings);
     const lastQuestion = this.rows("WHERE role = 'visitor' ORDER BY seq DESC LIMIT 1")[0]?.text;
     this.alert(site, {
-      title: `${site.alertName ?? site.name} chat - wants you - ${this.where()}`,
+      title: `${siteTag(site)} - Wants you - ${this.who(settings)}`,
       lines: [
         `💬 ${quote(lastQuestion ?? reason ?? "Asked for a person")}`,
         `📄 ${this.st.page ?? "/"} · ${this.visitorMessages()} messages`,
-        `📱 ${this.st.device ?? "unknown device"}`,
-        online ? "🟢 You're online: they're waiting" : "⚪ You're offline: they got the message form",
+        `📍 ${this.where()}`,
+        `📱 ${this.device()}`,
+        online ? "🟢 You're online: they're waiting" : "⚪ You're away: they got the message form",
       ],
-      priority: online ? 5 : 4,
+      priority: 4,
       tags: ["raising_hand"],
       actions: [{ label: "Open chat", url: inboxLink(this.env, this.st.chatId) }],
     });
@@ -773,13 +801,20 @@ export class ChatRoom extends DurableObject<Env> {
     void this.hub().enquiry(id);
     const link = inboxLink(this.env, this.st.chatId);
     this.alert(site, {
-      title: `${site.alertName ?? site.name} chat - message from ${name || email} - ${this.where()}`,
-      lines: [`✉️ ${email}`, `💬 ${quote(message, 400)}`, `📄 ${this.st.page ?? "/"} · ${Math.max(0, this.visitorMessages() - 1)} messages before this`],
+      title: `${siteTag(site)} - Message from ${name || email}`,
+      lines: [
+        name ? `👤 ${name}` : "",
+        `✉️ ${email}`,
+        `💬 ${quote(message, 400)}`,
+        `📄 ${this.st.page ?? "/"} · ${Math.max(0, this.visitorMessages() - 1)} messages before this`,
+        `📍 ${this.where()}`,
+        `📱 ${this.device()}`,
+      ],
       priority: 4,
       tags: ["envelope"],
       actions: [
-        { label: "Open in inbox", url: link },
-        { label: "Reply by email", url: `mailto:${email}` },
+        { label: "Open chat", url: link },
+        { label: "Reply", url: `mailto:${email}` },
       ],
     });
     const replyTo = await this.replyAddress(site);
@@ -834,12 +869,16 @@ export class ChatRoom extends DurableObject<Env> {
     await this.save();
     this.index({ mode: this.st.mode, wants_owner: 1 });
     this.broadcastStatus(await db.getSettings(this.env.DB));
+    const address = /<([^>]+)>/.exec(from)?.[1] ?? from;
     this.alert(site, {
-      title: `${site.alertName ?? site.name} chat - email reply from ${this.st.visitorName || from}`,
-      lines: [`💬 ${quote(text, 300)}`],
+      title: `${siteTag(site)} - Email reply from ${this.st.visitorName || address}`,
+      lines: [`💬 ${quote(text, 300)}`, `✉️ ${address}`],
       priority: 4,
       tags: ["incoming_envelope"],
-      actions: [{ label: "Open chat", url: inboxLink(this.env, this.st.chatId) }],
+      actions: [
+        { label: "Open chat", url: inboxLink(this.env, this.st.chatId) },
+        { label: "Reply", url: `mailto:${address}` },
+      ],
     });
   }
 
@@ -900,12 +939,13 @@ export class ChatRoom extends DurableObject<Env> {
       pageChanged: true,
       dev: init.dev,
       devHost: init.devHost,
+      test: init.test,
       location: init.location,
       handBack: [],
       transcriptsSent: 0,
     };
     await this.save();
-    this.index({ page: init.page ?? null, referrer: init.referrer ?? null });
+    this.index({ page: init.page ?? null, referrer: init.referrer ?? null, test: init.test ? 1 : 0 });
   }
 
   private async site(): Promise<SiteConfig> {
@@ -920,9 +960,11 @@ export class ChatRoom extends DurableObject<Env> {
     this.online = await this.hub().ownerPresent();
   }
 
-  /** Sends an alert without blocking the chat; a failed one is logged. */
-  private alert(site: SiteConfig, a: Alert): void {
-    const p = ntfy(this.env, site, { ...a, dev: this.st.devHost }).then((error) => {
+  /** Sends an alert without blocking the chat; a failed one is logged. System alerts and every alert from a test chat go to the system topic. */
+  private alert(site: SiteConfig, a: Alert, system = false): void {
+    const test = !!(this.st.test || this.st.devHost);
+    const target = system || test ? null : site;
+    const p = ntfy(this.env, target, { ...a, dev: test, priority: test ? 2 : a.priority }).then((error) => {
       if (error) return this.incidentNow(site, "alert_failed", `${a.title}: ${error}`);
     });
     this.ctx.waitUntil(p.catch((e) => console.error("alert", e)));
@@ -947,8 +989,17 @@ export class ChatRoom extends DurableObject<Env> {
     return this.st.location ?? "Unknown location";
   }
 
-  private who(): string {
-    return this.st.visitorName || this.st.visitorEmail || "The visitor";
+  private device(): string {
+    return this.st.device ?? "Unknown device";
+  }
+
+  /** "Visitor #42" (or the code or friendly name, per Settings). */
+  private label(settings: Settings): string {
+    return visitorLabel(settings.visitorLabel, { visitorId: this.st.visitorId, number: this.st.visitorNumber });
+  }
+
+  private who(settings: Settings): string {
+    return this.st.visitorName || this.st.visitorEmail || this.label(settings);
   }
 
   private visitorMessages(): number {
@@ -1089,6 +1140,11 @@ export class ChatRoom extends DurableObject<Env> {
       }
     }
   }
+}
+
+/** "KopiaLens chat", the start of every alert title. */
+function siteTag(site: SiteConfig): string {
+  return `${site.alertName ?? site.name} chat`;
 }
 
 function cap(s: string): string {

@@ -16,6 +16,7 @@
     "build": "npm run build -w @website-chatbot/widget && npm run build -w @website-chatbot/inbox",
     "deploy": "npm run build && npm run deploy -w @website-chatbot/server",
     "typecheck": "npm run typecheck --workspaces --if-present",
+    "sync:live": "node tools/kb-sync/sync.ts --live",
     "test": "npm run test --workspaces --if-present",
     "kb-sync": "npm run start -w @website-chatbot/kb-sync --"
   },

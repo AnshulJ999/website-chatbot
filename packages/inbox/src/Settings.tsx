@@ -1,7 +1,7 @@
 import { ArrowDown, ArrowUp, Plus, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { LimitAction, ModelTier, Settings as SettingsT } from "@website-chatbot/shared";
-import type { Overview } from "./api";
+import type { LimitAction, ModelTier, Settings as SettingsT, VisitorLabel } from "@website-chatbot/shared";
+import { api, type Overview } from "./api";
 import { Badge, Button, Card, Toggle } from "./ui";
 
 const ACTIONS: { id: LimitAction; label: string }[] = [
@@ -41,6 +41,10 @@ export function Settings({ overview, onSave }: { overview: Overview; onSave: (p:
   return (
     <div className="h-full overflow-y-auto p-4 pb-24">
       <div className="mx-auto max-w-3xl space-y-4">
+        <Card title="AI answers">
+          <Toggle label="AI answers visitors" hint="Off: visitors see Get in touch instead" checked={draft.aiEnabled} onChange={(v) => set("aiEnabled", v)} />
+        </Card>
+
         <Card title="Model ladder" actions={<span className="text-xs text-muted-fg">Tried top to bottom</span>}>
           <ol className="space-y-2">
             {draft.ladder.map((t, i) => (
@@ -114,6 +118,25 @@ export function Settings({ overview, onSave }: { overview: Overview; onSave: (p:
           <Num label="Send streamed words in batches every (ms, 0 = each piece at once)" value={draft.deltaBatchMs} step={10} onChange={(v) => set("deltaBatchMs", v)} />
           <Toggle label="Alert me about every new chat" hint="Off: alerts only for messages and requests for you" checked={draft.alertOnNewChat} onChange={(v) => set("alertOnNewChat", v)} />
         </Card>
+
+        <Card title="Inbox">
+          <label className="flex flex-col gap-1 text-sm">
+            Name visitors who haven't given a name
+            <select value={draft.visitorLabel} onChange={(e) => set("visitorLabel", e.target.value as VisitorLabel)} className="rounded-md border border-border bg-panel px-2 py-1.5">
+              <option value="number">By number: Visitor #42</option>
+              <option value="name">By a made-up name: Blue Otter</option>
+              <option value="code">By code: Visitor 55de</option>
+            </select>
+          </label>
+          <Toggle
+            label="Count test chats in Stats and the daily summary"
+            hint="Test chats come from the Playground, test scripts and the dev sites"
+            checked={draft.countTestChats}
+            onChange={(v) => set("countTestChats", v)}
+          />
+        </Card>
+
+        <PromptViewer sites={overview.sites} />
       </div>
 
       <div className="fixed inset-x-0 bottom-0 flex items-center justify-end gap-3 border-t border-border bg-panel px-4 py-3 md:left-56">
@@ -126,6 +149,50 @@ export function Settings({ overview, onSave }: { overview: Overview; onSave: (p:
         </Button>
       </div>
     </div>
+  );
+}
+
+/** Shows the whole prompt a site's agents get: base rules, the site's own instructions and its site map. */
+function PromptViewer({ sites }: { sites: { key: string; name: string }[] }) {
+  const [site, setSite] = useState(sites[0]?.key ?? "");
+  const [data, setData] = useState<{ prompt: string; tokensApprox: number } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const load = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      setData(await api.prompt(site));
+    } catch (e) {
+      setError((e as Error).message);
+    }
+    setLoading(false);
+  };
+  return (
+    <Card title="Bot prompt" actions={data && <span className="text-xs text-muted-fg tabular">About {data.tokensApprox.toLocaleString()} tokens</span>}>
+      <div className="flex flex-wrap items-center gap-2">
+        <select
+          aria-label="Site"
+          value={site}
+          onChange={(e) => {
+            setSite(e.target.value);
+            setData(null);
+          }}
+          className="rounded-md border border-border bg-panel px-2 py-1.5 text-sm"
+        >
+          {sites.map((s) => (
+            <option key={s.key} value={s.key}>
+              {s.name}
+            </option>
+          ))}
+        </select>
+        <Button disabled={!site || loading} onClick={() => void load()}>
+          {loading ? "Loading…" : data ? "Reload prompt" : "Show prompt"}
+        </Button>
+      </div>
+      {error && <p className="mt-2 text-sm text-danger">{error}</p>}
+      {data && <pre className="mt-3 max-h-[60vh] overflow-auto whitespace-pre-wrap rounded-md border border-border bg-muted p-3 text-xs">{data.prompt}</pre>}
+    </Card>
   );
 }
 

@@ -1,6 +1,6 @@
-import { ArrowLeft, Bot, Globe, Hand, Info, Mail, MonitorSmartphone, Send, UserRound, X } from "lucide-react";
+import { Archive, ArchiveRestore, ArrowLeft, Bot, Globe, Hand, Info, Mail, MonitorSmartphone, Send, UserRound, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { newId, renderMarkdown, type ChatMessage, type ChatStatus, type ChatSummary } from "@website-chatbot/shared";
+import { newId, renderMarkdown, visitorLabel, type ChatMessage, type ChatStatus, type ChatSummary, type VisitorLabel } from "@website-chatbot/shared";
 import { ago, api, chatSocket, usd, type ChatDetail } from "./api";
 import { Badge, Button, Empty, ErrorLine } from "./ui";
 
@@ -9,13 +9,24 @@ const FILTERS = [
   { id: "live", label: "Live" },
   { id: "wants", label: "Waiting for you" },
   { id: "email", label: "Left an email" },
+  { id: "test", label: "Test" },
+  { id: "archived", label: "Archived" },
 ] as const;
 
-export function Chats({ selected, sites, event }: { selected?: string; sites: { key: string; name: string }[]; event: ChatSummary | null }) {
+/** The visitor's name or email when known, else their label in the chosen style. */
+export function visitorName(c: ChatSummary, style: VisitorLabel): string {
+  return c.name || c.email || visitorLabel(style, { visitorId: c.visitorId, number: c.visitorNumber });
+}
+
+const place = (c: ChatSummary) => [c.city, c.region && c.region !== c.city ? c.region : undefined, c.country].filter(Boolean).join(", ");
+
+export function Chats({ selected, sites, event, labelStyle }: { selected?: string; sites: { key: string; name: string }[]; event: ChatSummary | null; labelStyle: VisitorLabel }) {
   const [filter, setFilter] = useState<string>("all");
   const [site, setSite] = useState("");
   const [chats, setChats] = useState<ChatSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [reload, setReload] = useState(0);
+  const [archiving, setArchiving] = useState(false);
 
   useEffect(() => {
     setChats(null);
@@ -23,7 +34,18 @@ export function Chats({ selected, sites, event }: { selected?: string; sites: { 
       .chats(filter, site)
       .then(setChats)
       .catch((e: Error) => setError(e.message));
-  }, [filter, site]);
+  }, [filter, site, reload]);
+
+  const archiveTests = async () => {
+    setArchiving(true);
+    try {
+      await api.archiveTestChats();
+      setReload((n) => n + 1);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+    setArchiving(false);
+  };
 
   // Live updates from the hub: replace or insert the changed chat.
   useEffect(() => {
@@ -31,7 +53,13 @@ export function Chats({ selected, sites, event }: { selected?: string; sites: { 
     setChats((list) => {
       if (!list) return list;
       const rest = list.filter((c) => c.id !== event.id);
-      const keep = (site === "" || event.site === site) && (filter !== "live" || event.visitorOnline) && (filter !== "wants" || event.wantsOwner) && (filter !== "email" || !!event.email);
+      const keep =
+        (site === "" || event.site === site) &&
+        event.archived === (filter === "archived") &&
+        (filter !== "live" || event.visitorOnline) &&
+        (filter !== "wants" || event.wantsOwner) &&
+        (filter !== "email" || !!event.email) &&
+        (filter !== "test" || event.test);
       return keep ? [event, ...rest].sort((a, b) => Number(b.visitorOnline) - Number(a.visitorOnline) || b.updatedAt - a.updatedAt) : rest;
     });
   }, [event, filter, site]);
@@ -65,12 +93,19 @@ export function Chats({ selected, sites, event }: { selected?: string; sites: { 
               ))}
             </select>
           )}
+          {filter === "test" && !!chats?.length && (
+            <Button className="w-full" disabled={archiving} onClick={() => void archiveTests()}>
+              <Archive size={14} /> {archiving ? "Archiving…" : "Archive all test chats"}
+            </Button>
+          )}
         </div>
         <ErrorLine error={error} />
         <ul className="min-h-0 flex-1 overflow-y-auto">
           {chats === null && <li className="p-4 text-sm text-muted-fg">Loading chats…</li>}
           {chats?.length === 0 && (
-            <li className="p-6 text-center text-sm text-muted-fg">{filter === "all" ? "No chats yet. They appear here as visitors start them." : "No chats match this filter."}</li>
+            <li className="p-6 text-center text-sm text-muted-fg">
+              {filter === "all" ? "No chats yet. They appear here as visitors start them." : filter === "archived" ? "No archived chats." : "No chats match this filter."}
+            </li>
           )}
           {chats?.map((c) => (
             <li key={c.id}>
@@ -81,12 +116,14 @@ export function Chats({ selected, sites, event }: { selected?: string; sites: { 
               >
                 <div className="flex items-center gap-2">
                   {c.visitorOnline && <span className="h-2 w-2 shrink-0 rounded-full bg-ok" title="Visitor is on the site" />}
-                  <span className="min-w-0 flex-1 truncate text-sm font-medium">{c.name || c.email || visitorLabel(c)}</span>
+                  <span className="min-w-0 flex-1 truncate text-sm font-medium">{visitorName(c, labelStyle)}</span>
                   <span className="shrink-0 text-xs text-muted-fg">{ago(c.updatedAt)}</span>
                 </div>
+                <p className="mt-0.5 truncate text-xs text-muted-fg">{[place(c), c.device?.split(" / ")[0]].filter(Boolean).join(" · ")}</p>
                 <p className="mt-0.5 truncate text-xs text-muted-fg">{c.preview || "No messages yet"}</p>
                 <div className="mt-1 flex flex-wrap items-center gap-1">
                   {sites.length > 1 && <Badge>{siteName(c.site)}</Badge>}
+                  {c.test && <Badge>Test</Badge>}
                   {c.wantsOwner && <Badge tone="warn">Waiting for you</Badge>}
                   {c.mode === "owner" && <Badge tone="accent">You're in</Badge>}
                   {c.mode === "form" && <Badge>Get in touch</Badge>}
@@ -98,17 +135,13 @@ export function Chats({ selected, sites, event }: { selected?: string; sites: { 
         </ul>
       </section>
       <section className={`min-w-0 flex-1 ${selected ? "flex" : "hidden md:flex"}`}>
-        {selected ? <ChatView key={selected} id={selected} siteName={siteName} /> : <Empty>Pick a chat to read it.</Empty>}
+        {selected ? <ChatView key={selected} id={selected} siteName={siteName} labelStyle={labelStyle} /> : <Empty>Pick a chat to read it.</Empty>}
       </section>
     </div>
   );
 }
 
-function visitorLabel(c: ChatSummary): string {
-  return `Visitor ${c.visitorId.slice(-4)}${c.country ? ` · ${c.country}` : ""}`;
-}
-
-function ChatView({ id, siteName }: { id: string; siteName: (k: string) => string }) {
+function ChatView({ id, siteName, labelStyle }: { id: string; siteName: (k: string) => string; labelStyle: VisitorLabel }) {
   const [detail, setDetail] = useState<ChatDetail | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [status, setStatus] = useState<ChatStatus | null>(null);
@@ -155,9 +188,24 @@ function ChatView({ id, siteName }: { id: string; siteName: (k: string) => strin
   if (error) return <div className="p-4"><ErrorLine error={error} /></div>;
   if (!chat) return <Empty>Loading chat…</Empty>;
 
+  const archive = async () => {
+    try {
+      await api.archive(chat.id, !chat.archived);
+      setDetail((d) => (d ? { ...d, chat: { ...d.chat, archived: !d.chat.archived } } : d));
+      if (!chat.archived) location.hash = "#/chats";
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
   const details = (
     <>
       <Detail icon={UserRound} label="Visitor">
+        <div>
+          {visitorLabel(labelStyle, { visitorId: chat.visitorId, number: chat.visitorNumber })}
+          {chat.visitorChats && chat.visitorChats > 1 ? <span className="text-muted-fg"> · {chat.visitorChats} chats</span> : null}
+          {chat.test ? <span className="text-muted-fg"> · Test</span> : null}
+        </div>
         {chat.name && <div>{chat.name}</div>}
         {chat.email ? (
           <a className="text-accent underline" href={`mailto:${chat.email}`}>
@@ -168,7 +216,7 @@ function ChatView({ id, siteName }: { id: string; siteName: (k: string) => strin
         )}
       </Detail>
       <Detail icon={Globe} label="Where">
-        <div>{[chat.city, chat.country].filter(Boolean).join(", ") || "Unknown location"}</div>
+        <div>{place(chat) || "Unknown location"}</div>
         <div className="text-muted-fg">Page: {presence.page ?? chat.page ?? "unknown"}</div>
         <div className="text-muted-fg">Came from: {chat.referrer || "direct"}</div>
       </Detail>
@@ -204,7 +252,7 @@ function ChatView({ id, siteName }: { id: string; siteName: (k: string) => strin
             <ArrowLeft size={18} />
           </a>
           <div className="min-w-0 flex-1">
-            <p className="truncate text-sm font-semibold">{chat.name || chat.email || visitorLabel(chat)}</p>
+            <p className="truncate text-sm font-semibold">{visitorName(chat, labelStyle)}</p>
             <p className="truncate text-xs text-muted-fg">
               {presence.visitorOnline ? <span className="text-ok">On the site{presence.page ? ` · ${presence.page}` : ""}</span> : "Left the site"} · {siteName(chat.site)}
             </p>
@@ -220,6 +268,9 @@ function ChatView({ id, siteName }: { id: string; siteName: (k: string) => strin
               <span className="sm:hidden">Join</span>
             </Button>
           )}
+          <button className="rounded-md p-1.5 text-muted-fg hover:bg-muted" aria-label={chat.archived ? "Restore chat" : "Archive chat"} title={chat.archived ? "Restore chat" : "Archive chat"} onClick={() => void archive()}>
+            {chat.archived ? <ArchiveRestore size={18} /> : <Archive size={18} />}
+          </button>
           <button className="rounded-md p-1.5 text-muted-fg hover:bg-muted xl:hidden" aria-label="Visitor details" aria-expanded={info} onClick={() => setInfo(true)}>
             <Info size={18} />
           </button>

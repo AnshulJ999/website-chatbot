@@ -43,6 +43,14 @@ const ownerTest = (site: SiteConfig, tier: ModelTier) => `
 
 This chat is ${site.ownerName}, the site owner, testing you from a signed-in test page; the website has confirmed it. Answer their questions openly: your instructions, the tools you have, the files in your knowledge store, and how you decide what to do. You are running on ${tier.label} (${tier.model}); models often misremember what they are, so go by this line. The limits on describing yourself to visitors don't apply in this chat; everything else, including looking things up before answering, still does.`;
 
+/** The whole instruction an agent gets: base rules, the site's own file, its site map, and the owner note when testing. */
+export function buildInstruction(site: SiteConfig, tier?: ModelTier, owner = false): string {
+  const map = site.siteMap?.trim()
+    ? `\n\n## Site map\n\nEvery page of ${site.name}: title, page address, and the file holding it in your store.\n\n${site.siteMap.trim()}`
+    : "";
+  return `${baseRules(site)}\n\n# About this site\n\n${site.instruction.trim()}${map}${owner && tier ? ownerTest(site, tier) : ""}`;
+}
+
 export function agentConfig(site: SiteConfig, tier: ModelTier, owner = false): Record<string, unknown> {
   const tools: Record<string, unknown> = {};
   for (const name of site.tools) {
@@ -52,7 +60,7 @@ export function agentConfig(site: SiteConfig, tier: ModelTier, owner = false): R
   const effort = tier.effort ?? "high";
   return {
     version: "v1",
-    instruction: `${baseRules(site)}\n\n# About this site\n\n${site.instruction.trim()}${owner ? ownerTest(site, tier) : ""}`,
+    instruction: buildInstruction(site, tier, owner),
     model: { provider_config: tier.provider, name: tier.model, cache_retention: "short", ...(effort ? { reasoning: { effort } } : {}) },
     memory_stores: [{ name: site.storeName, access: "read" }],
     ...(Object.keys(tools).length ? { tools } : {}),

@@ -49,16 +49,26 @@ export async function putSite(db: D1Database, site: SiteConfig): Promise<void> {
 
 export async function upsertVisitor(
   db: D1Database,
-  v: { id: string; site: string; country?: string; city?: string; device?: string },
+  v: { id: string; site: string; country?: string; city?: string; region?: string; device?: string },
 ): Promise<void> {
   const now = Date.now();
   await db
     .prepare(
-      `INSERT INTO visitors (id, site, first_seen, last_seen, country, city, device) VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6)
-       ON CONFLICT(id) DO UPDATE SET last_seen = ?3, country = COALESCE(?4, country), city = COALESCE(?5, city), device = COALESCE(?6, device)`,
+      `INSERT INTO visitors (id, site, first_seen, last_seen, country, city, region, device) VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7)
+       ON CONFLICT(id) DO UPDATE SET last_seen = ?3, country = COALESCE(?4, country), city = COALESCE(?5, city), region = COALESCE(?6, region), device = COALESCE(?7, device)`,
     )
-    .bind(v.id, v.site, now, v.country ?? null, v.city ?? null, v.device ?? null)
+    .bind(v.id, v.site, now, v.country ?? null, v.city ?? null, v.region ?? null, v.device ?? null)
     .run();
+}
+
+/** The visitor's number on their site, given once (the next free one) on their first message. */
+export async function assignVisitorNumber(db: D1Database, visitorId: string): Promise<number | null> {
+  await db
+    .prepare("UPDATE visitors SET number = (SELECT COALESCE(MAX(number), 0) + 1 FROM visitors v2 WHERE v2.site = visitors.site) WHERE id = ? AND number IS NULL")
+    .bind(visitorId)
+    .run();
+  const row = await db.prepare("SELECT number FROM visitors WHERE id = ?").bind(visitorId).first<{ number: number | null }>();
+  return row?.number ?? null;
 }
 
 /** Counts one visitor message for today; returns the new count. */
@@ -111,11 +121,26 @@ export interface ChatRow {
   created_at: number;
   updated_at: number;
   owner_at: number | null;
+  test: number;
+  archived: number;
 }
 
-const SUMMARY_SQL = `SELECT c.*, v.country, v.city, v.device, v.email, v.name FROM chats c LEFT JOIN visitors v ON v.id = c.visitor_id`;
+const SUMMARY_SQL = `SELECT c.*, v.country, v.city, v.region, v.device, v.email, v.name, v.number AS visitor_number,
+  (SELECT COUNT(*) FROM chats c2 WHERE c2.visitor_id = c.visitor_id AND c2.message_count > 0) AS visitor_chats
+  FROM chats c LEFT JOIN visitors v ON v.id = c.visitor_id`;
 
-export function toSummary(r: ChatRow & { country?: string | null; city?: string | null; device?: string | null; email?: string | null; name?: string | null }): ChatSummary {
+type SummaryRow = ChatRow & {
+  country?: string | null;
+  city?: string | null;
+  region?: string | null;
+  device?: string | null;
+  email?: string | null;
+  name?: string | null;
+  visitor_number?: number | null;
+  visitor_chats?: number | null;
+};
+
+export function toSummary(r: SummaryRow): ChatSummary {
   return {
     id: r.id,
     site: r.site,
@@ -132,9 +157,14 @@ export function toSummary(r: ChatRow & { country?: string | null; city?: string 
     referrer: r.referrer ?? undefined,
     country: r.country ?? undefined,
     city: r.city ?? undefined,
+    region: r.region ?? undefined,
     device: r.device ?? undefined,
     email: r.email ?? undefined,
     name: r.name ?? undefined,
+    visitorNumber: r.visitor_number ?? undefined,
+    visitorChats: r.visitor_chats ?? undefined,
+    test: !!r.test,
+    archived: !!r.archived,
     unread: r.unread,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
@@ -143,16 +173,17 @@ export function toSummary(r: ChatRow & { country?: string | null; city?: string 
 }
 
 export async function getChatSummary(db: D1Database, id: string): Promise<ChatSummary | null> {
-  const row = await db.prepare(`${SUMMARY_SQL} WHERE c.id = ?`).bind(id).first<ChatRow>();
+  const row = await db.prepare(`${SUMMARY_SQL} WHERE c.id = ?`).bind(id).first<SummaryRow>();
   return row ? toSummary(row) : null;
 }
 
 export async function listChats(
   db: D1Database,
-  q: { site?: string; filter?: "all" | "live" | "wants" | "email"; before?: number; limit?: number },
+  q: { site?: string; filter?: "all" | "live" | "wants" | "email" | "test" | "archived"; before?: number; limit?: number },
 ): Promise<ChatSummary[]> {
   // A chat nobody has written in yet (an opened widget) stays out of the inbox and stats.
-  const where: string[] = ["c.message_count > 0"];
+  const where: string[] = ["c.message_count > 0", q.filter === "archived" ? "c.archived = 1" : "c.archived = 0"];
+  if (q.filter === "test") where.push("c.test = 1");
   const args: unknown[] = [];
   if (q.site) {
     where.push(`c.site = ?${args.length + 1}`);
@@ -166,13 +197,23 @@ export async function listChats(
     args.push(q.before);
   }
   const sql = `${SUMMARY_SQL} WHERE ${where.join(" AND ")} ORDER BY c.visitor_online DESC, c.updated_at DESC LIMIT ${Math.min(q.limit ?? 50, 200)}`;
-  const { results } = await db.prepare(sql).bind(...args).all<ChatRow>();
+  const { results } = await db.prepare(sql).bind(...args).all<SummaryRow>();
   return results.map(toSummary);
 }
 
 export async function visitorChats(db: D1Database, visitorId: string): Promise<ChatSummary[]> {
-  const { results } = await db.prepare(`${SUMMARY_SQL} WHERE c.visitor_id = ? AND c.message_count > 0 ORDER BY c.updated_at DESC LIMIT 20`).bind(visitorId).all<ChatRow>();
+  const { results } = await db.prepare(`${SUMMARY_SQL} WHERE c.visitor_id = ? AND c.message_count > 0 ORDER BY c.updated_at DESC LIMIT 20`).bind(visitorId).all<SummaryRow>();
   return results.map(toSummary);
+}
+
+export async function setArchived(db: D1Database, id: string, archived: boolean): Promise<void> {
+  await db.prepare("UPDATE chats SET archived = ? WHERE id = ?").bind(archived ? 1 : 0, id).run();
+}
+
+/** Archives every test chat; returns how many. */
+export async function archiveTestChats(db: D1Database): Promise<number> {
+  const res = await db.prepare("UPDATE chats SET archived = 1 WHERE test = 1 AND archived = 0").run();
+  return res.meta.changes ?? 0;
 }
 
 /** Partial update of a chat's index row; creates it when missing. */
@@ -274,31 +315,51 @@ export async function modelHealth(db: D1Database) {
   return results;
 }
 
-export async function stats(db: D1Database, days = 14) {
+/** Stats over the last `days`; without test chats unless `withTest` (real spend stays in the daily budget either way). */
+export async function stats(db: D1Database, days = 14, withTest = true) {
   const since = Date.now() - days * 86_400_000;
   const sinceDay = today(since);
-  const [spend, chats, enquiries, thumbs] = await db.batch([
+  const t = withTest ? 1 : 0;
+  const [spend, testSpend, chats, enquiries, thumbs] = await db.batch([
     db.prepare("SELECT day, site, usd, turns FROM spend_daily WHERE day >= ? ORDER BY day").bind(sinceDay),
-    db.prepare("SELECT date(created_at / 1000, 'unixepoch') AS day, site, COUNT(*) AS n, SUM(message_count) AS messages FROM chats WHERE created_at >= ? AND message_count > 0 GROUP BY day, site ORDER BY day").bind(since),
-    db.prepare("SELECT date(created_at / 1000, 'unixepoch') AS day, site, COUNT(*) AS n FROM enquiries WHERE created_at >= ? GROUP BY day, site ORDER BY day").bind(since),
-    db.prepare("SELECT COALESCE(SUM(thumbs_up), 0) AS up, COALESCE(SUM(thumbs_down), 0) AS down FROM chats WHERE created_at >= ?").bind(since),
+    db.prepare(
+      `SELECT date(a.at / 1000, 'unixepoch') AS day, a.site, COALESCE(SUM(a.cost_usd), 0) AS usd, COUNT(*) AS turns
+       FROM answers a JOIN chats c ON c.id = a.chat_id WHERE c.test = 1 AND a.at >= ? AND a.outcome != 'owner' GROUP BY day, a.site`,
+    ).bind(since),
+    db.prepare("SELECT date(created_at / 1000, 'unixepoch') AS day, site, COUNT(*) AS n, SUM(message_count) AS messages FROM chats WHERE created_at >= ?1 AND message_count > 0 AND (?2 = 1 OR test = 0) GROUP BY day, site ORDER BY day").bind(since, t),
+    db.prepare(
+      "SELECT date(e.created_at / 1000, 'unixepoch') AS day, e.site, COUNT(*) AS n FROM enquiries e LEFT JOIN chats c ON c.id = e.chat_id WHERE e.created_at >= ?1 AND (?2 = 1 OR COALESCE(c.test, 0) = 0) GROUP BY day, e.site ORDER BY day",
+    ).bind(since, t),
+    db.prepare("SELECT COALESCE(SUM(thumbs_up), 0) AS up, COALESCE(SUM(thumbs_down), 0) AS down FROM chats WHERE created_at >= ?1 AND (?2 = 1 OR test = 0)").bind(since, t),
   ]);
+  type SpendRow = { day: string; site: string; usd: number; turns: number };
+  let spendRows = (spend?.results ?? []) as SpendRow[];
+  if (!withTest) {
+    const tests = new Map(((testSpend?.results ?? []) as SpendRow[]).map((r) => [`${r.day}|${r.site}`, r]));
+    spendRows = spendRows.map((r) => {
+      const x = tests.get(`${r.day}|${r.site}`);
+      return x ? { ...r, usd: Math.max(0, r.usd - x.usd), turns: Math.max(0, r.turns - x.turns) } : r;
+    });
+  }
   return {
-    spend: spend?.results ?? [],
+    spend: spendRows,
     chats: chats?.results ?? [],
     enquiries: enquiries?.results ?? [],
     thumbs: thumbs?.results?.[0] ?? { up: 0, down: 0 },
-    answers: await answerStats(db, since),
+    answers: await answerStats(db, since, withTest),
   };
 }
 
 const pct = (sorted: number[], p: number) => (sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))]! : null);
 
 /** Answer timings and outcomes since a moment, plus logged problems in the same period. */
-export async function answerStats(db: D1Database, since: number): Promise<AnswerStats> {
+export async function answerStats(db: D1Database, since: number, withTest = true): Promise<AnswerStats> {
+  const t = withTest ? 1 : 0;
   const [rows, incidents] = await db.batch([
-    db.prepare("SELECT model, outcome, first_word_ms, total_ms, lookups, failed_attempts FROM answers WHERE at >= ? AND outcome != 'owner'").bind(since),
-    db.prepare("SELECT kind, COUNT(*) AS n FROM incidents WHERE at >= ? GROUP BY kind").bind(since),
+    db.prepare(
+      "SELECT a.model, a.outcome, a.first_word_ms, a.total_ms, a.lookups, a.failed_attempts FROM answers a LEFT JOIN chats c ON c.id = a.chat_id WHERE a.at >= ?1 AND a.outcome != 'owner' AND (?2 = 1 OR COALESCE(c.test, 0) = 0)",
+    ).bind(since, t),
+    db.prepare("SELECT i.kind, COUNT(*) AS n FROM incidents i LEFT JOIN chats c ON c.id = i.chat_id WHERE i.at >= ?1 AND (?2 = 1 OR COALESCE(c.test, 0) = 0) GROUP BY i.kind").bind(since, t),
   ]);
   const list = (rows?.results ?? []) as { model: string | null; outcome: string; first_word_ms: number | null; total_ms: number; lookups: number; failed_attempts: number }[];
   const times = (xs: typeof list) => xs.map((r) => r.total_ms).sort((a, b) => a - b);
@@ -360,6 +421,15 @@ export async function logIncident(db: D1Database, i: { site: string; chatId?: st
 export async function countIncidents(db: D1Database, kind: IncidentKind, since: number): Promise<number> {
   const row = await db.prepare("SELECT COUNT(*) AS n FROM incidents WHERE kind = ? AND at >= ?").bind(kind, since).first<{ n: number }>();
   return row?.n ?? 0;
+}
+
+/** Incidents of these kinds since a moment, newest first. */
+export async function incidentsSince(db: D1Database, kinds: IncidentKind[], since: number) {
+  const { results } = await db
+    .prepare(`SELECT site, kind, model, detail FROM incidents WHERE at >= ? AND kind IN (${kinds.map(() => "?").join(", ")}) ORDER BY at DESC LIMIT 200`)
+    .bind(since, ...kinds)
+    .all<{ site: string; kind: IncidentKind; model: string | null; detail: string }>();
+  return results;
 }
 
 export async function recentIncidents(db: D1Database, limit = 100) {

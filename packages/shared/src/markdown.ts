@@ -1,6 +1,6 @@
-// A small, safe Markdown subset for chat answers: paragraphs, bold, italics, inline code,
-// links, bullet and numbered lists, line breaks. Everything is escaped first; only http(s)
-// and mailto links become anchors.
+// A small, safe Markdown subset for chat answers: paragraphs, bold, italics, inline code, links,
+// bullet and numbered lists, fenced code blocks, simple tables, and headings (shown as a bold line).
+// Everything is escaped first; only http(s) and mailto links become anchors.
 
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
@@ -24,7 +24,22 @@ function inline(s: string): string {
   return out.replace(/\u0000(\d+)\u0000/g, (_, i: string) => `<code>${codes[Number(i)]}</code>`);
 }
 
-export function renderMarkdown(src: string): string {
+const cells = (line: string) =>
+  line
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((c) => c.trim());
+const isTableRow = (line: string) => /^\s*\|.*\|\s*$/.test(line);
+const isTableRule = (line: string) => /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(line);
+
+export interface MarkdownOptions {
+  /** Adds a Copy button to code blocks (the page handles clicks on `.code-copy`). */
+  copyButtons?: boolean;
+}
+
+export function renderMarkdown(src: string, opts: MarkdownOptions = {}): string {
   const lines = src.replace(/\r\n/g, "\n").split("\n");
   const html: string[] = [];
   let para: string[] = [];
@@ -38,9 +53,44 @@ export function renderMarkdown(src: string): string {
     if (list) html.push(`<${list.tag}>${list.items.map((i) => `<li>${inline(i)}</li>`).join("")}</${list.tag}>`);
     list = null;
   };
+  const flush = () => {
+    flushPara();
+    flushList();
+  };
 
-  for (const raw of lines) {
-    const line = raw.trimEnd();
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!.trimEnd();
+
+    const fence = /^\s*```/.exec(line);
+    if (fence) {
+      flush();
+      const code: string[] = [];
+      while (++i < lines.length && !/^\s*```/.test(lines[i]!)) code.push(lines[i]!);
+      const copy = opts.copyButtons ? `<button type="button" class="code-copy" aria-label="Copy code">Copy</button>` : "";
+      html.push(`<div class="code-block">${copy}<pre><code>${esc(code.join("\n"))}</code></pre></div>`);
+      continue;
+    }
+
+    if (isTableRow(line) && i + 1 < lines.length && isTableRule(lines[i + 1]!)) {
+      flush();
+      const head = cells(line);
+      const rows: string[][] = [];
+      i += 2;
+      while (i < lines.length && isTableRow(lines[i]!)) rows.push(cells(lines[i++]!));
+      i--;
+      const th = head.map((c) => `<th>${inline(c)}</th>`).join("");
+      const tb = rows.map((r) => `<tr>${head.map((_, j) => `<td>${inline(r[j] ?? "")}</td>`).join("")}</tr>`).join("");
+      html.push(`<div class="table-wrap"><table><thead><tr>${th}</tr></thead><tbody>${tb}</tbody></table></div>`);
+      continue;
+    }
+
+    const heading = /^\s*#{1,6}\s+(.*)$/.exec(line);
+    if (heading) {
+      flush();
+      html.push(`<p><strong>${inline(heading[1]!.replace(/\*\*/g, ""))}</strong></p>`);
+      continue;
+    }
+
     const bullet = /^\s*[-*•]\s+(.*)$/.exec(line);
     const num = /^\s*\d+[.)]\s+(.*)$/.exec(line);
     if (bullet || num) {
@@ -50,14 +100,12 @@ export function renderMarkdown(src: string): string {
       list ??= { tag, items: [] };
       list.items.push((bullet ?? num)![1]!);
     } else if (!line.trim()) {
-      flushPara();
-      flushList();
+      flush();
     } else {
       flushList();
-      para.push(line.replace(/^#{1,6}\s+/, ""));
+      para.push(line);
     }
   }
-  flushPara();
-  flushList();
+  flush();
   return html.join("");
 }

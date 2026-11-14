@@ -1,18 +1,24 @@
 #!/usr/bin/env node
 // kb-sync: copies a site's content into its Omnara memory store (one file per page, each starting
-// with its real URL) and pushes the site's chatbot config to the chat server.
+// with its real URL) and pushes the site's chatbot config, with a map of its pages, to the chat server.
 //
-//   node sync.ts <site>/chatbot/chatbot.config.json [--env <file>] [--dry-run [--show <store path>]] [--prune] [--create-store] [--no-push]
+//   node sync.ts <site>/chatbot/chatbot.config.json [--live] [--env <file>] [--dry-run [--show <store path>]] [--prune] [--force] [--alert] [--create-store] [--no-push]
 //
-// Credentials come from the environment or --env (a KEY=value file such as the server's .dev.vars):
-// OMNARA_API_KEY, OMNARA_ORG_ID, OMNARA_PROJECT_ID, CHATBOT_SERVER (or PUBLIC_URL), API_TOKEN.
+// --live: the deployed server. Reads .sync.vars beside this file, removes pages that left the site (guarded),
+// checks the store afterwards and asks the live bot one question. Ends with "SYNC OK" or "SYNC FAILED" (exit 1).
+// Checks run before anything is written; --force overrides them. --alert sends a failure to the system ntfy topic.
+//
+// Credentials come from the environment, --env, or .sync.vars (--live): OMNARA_API_KEY, OMNARA_ORG_ID,
+// OMNARA_PROJECT_ID, CHATBOT_SERVER (or PUBLIC_URL), API_TOKEN; optional CHATBOT_SERVER_IP (reach the server at
+// this address when local DNS points its name elsewhere), NTFY_URL and NTFY_TOKEN (for --alert).
 
 import { createHash } from "node:crypto";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, dirname, extname, join, posix, relative, resolve } from "node:path";
 import { gfm } from "@joplin/turndown-plugin-gfm";
 import { parseHTML } from "linkedom";
 import TurndownService from "turndown";
+import { Agent, WebSocket, fetch as uFetch } from "undici";
 
 interface Source {
   /**
@@ -62,14 +68,27 @@ if (!configPath) {
   process.exit(2);
 }
 
+const live = flag("--live");
+const force = flag("--force");
 const env: Record<string, string | undefined> = { ...process.env };
-const envFile = opt("--env");
+const liveVars = join(import.meta.dirname, ".sync.vars");
+const envFile = opt("--env") ?? (live ? liveVars : undefined);
+if (live && !opt("--env") && !existsSync(liveVars)) {
+  console.error(`--live needs ${liveVars} (copy .sync.vars.example)`);
+  process.exit(2);
+}
 if (envFile) {
   for (const line of readFileSync(envFile, "utf8").split(/\r?\n/)) {
     const m = /^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/.exec(line);
     if (m && !line.trim().startsWith("#")) env[m[1]!] ??= m[2]!.replace(/^["']|["']$/g, "");
   }
 }
+
+/** Requests to the chat server; CHATBOT_SERVER_IP pins its address when local DNS sends the name elsewhere. */
+const pinned = env.CHATBOT_SERVER_IP
+  ? new Agent({ connect: { lookup: (_h, o, cb) => (o?.all ? cb(null, [{ address: env.CHATBOT_SERVER_IP!, family: 4 }]) : cb(null, env.CHATBOT_SERVER_IP!, 4)) } })
+  : undefined;
+const serverFetch = (url: string, init: Parameters<typeof uFetch>[1] = {}) => uFetch(url, { ...init, ...(pinned ? { dispatcher: pinned } : {}) });
 const need = (k: string) => {
   const v = env[k];
   if (!v) throw new Error(`Missing ${k} (set it in the environment or the --env file)`);
@@ -181,6 +200,10 @@ async function sitemapUrls(sitemap: string, readOrigin: string, publicOrigin: st
   return locs;
 }
 
+/** Store paths of sitemap pages that couldn't be fetched this run: their old copies are kept. */
+const skippedPaths: string[] = [];
+let sitemapTotal = 0;
+
 async function collectSitemap(s: Source, applyExcludes: boolean): Promise<KbFile[]> {
   const finalSitemap = (await fetch(s.sitemap!, { method: "HEAD", redirect: "follow" }).catch(() => null))?.url || s.sitemap!;
   const publicOrigin = new URL(finalSitemap).origin;
@@ -193,16 +216,18 @@ async function collectSitemap(s: Source, applyExcludes: boolean): Promise<KbFile
     if (applyExcludes && s.exclude && pathMatches(path, s.exclude)) return false;
     return true;
   });
+  sitemapTotal += queue.length;
   const worker = async () => {
     for (let u = queue.shift(); u; u = queue.shift()) {
       const path = new URL(u).pathname.replace(/\/$/, "") || "/";
       const res = await fetch(u.replace(publicOrigin, readOrigin)).catch(() => null);
+      const name = path === "/" ? "home" : path.slice(1);
       if (!res?.ok || !(res.headers.get("content-type") ?? "").includes("text/html")) {
         skipped.push(`${path} (${res ? `${res.status} ${res.headers.get("content-type") ?? ""}` : "unreachable"})`);
+        skippedPaths.push(`${s.storePath}/${name}.md`);
         continue;
       }
       const md = pageToMarkdown(await res.text(), u, readOrigin, s.main);
-      const name = path === "/" ? "home" : path.slice(1);
       out.push({ path: `${s.storePath}/${name}.md`, body: withUrl(u, md) });
     }
   };
@@ -310,16 +335,101 @@ async function listAll(store: string, path = ""): Promise<string[]> {
   return out;
 }
 
+// ---------- site map ----------
+
+/** One line per file: title, page address, store path. Goes into every chat's prompt, so it holds nothing that drifts. */
+function siteMap(files: KbFile[]): string {
+  return files
+    .map((f) => {
+      const url = /^URL: (.+)$/m.exec(f.body)?.[1]?.trim() ?? "";
+      const title = (/^# (.+)$/m.exec(f.body)?.[1] ?? /^Title: (.+)$/m.exec(f.body)?.[1] ?? f.path).replace(/\*\*/g, "").trim();
+      const page = /^https?:/.test(url) ? url : "no page";
+      return `- ${title} - ${page} - ${f.path.replace(/^\/+/, "")}`;
+    })
+    .sort((a, b) => a.localeCompare(b))
+    .join("\n");
+}
+
+// ---------- safety checks ----------
+
+/** Reasons not to touch the store: empty or error-looking pages, many failed pages, far fewer pages than before. */
+function preflight(files: KbFile[], existing: number): string[] {
+  const problems: string[] = [];
+  if (!files.length) problems.push("no files were collected");
+  const thin = files.filter((f) => f.body.replace(/^URL: .*$/m, "").trim().length < 120).map((f) => f.path);
+  if (thin.length) problems.push(`${thin.length} near-empty file(s): ${thin.slice(0, 5).join(", ")}`);
+  const errorish = files.filter((f) => /^(Title: |# )(.*\b(404|not found|page not found|server error|bad gateway)\b.*)$/im.test(f.body.slice(0, 400))).map((f) => f.path);
+  if (errorish.length) problems.push(`${errorish.length} page(s) look like error pages: ${errorish.slice(0, 5).join(", ")}`);
+  if (sitemapTotal && skippedPaths.length / sitemapTotal > 0.2) problems.push(`${skippedPaths.length} of ${sitemapTotal} live pages couldn't be fetched`);
+  if (existing > 10 && files.length < existing * 0.7) problems.push(`only ${files.length} files now, the store has ${existing}`);
+  return problems;
+}
+
+/** Tells the system ntfy topic that a sync failed (--alert). */
+async function alertFailure(problems: string[]): Promise<void> {
+  if (!flag("--alert") || !env.NTFY_URL) return;
+  const name = String(cfg.site.name ?? cfg.site.key);
+  await fetch(env.NTFY_URL, {
+    method: "POST",
+    headers: { Title: `Chatbot - Knowledge sync failed - ${name}`, Priority: "4", Tags: "warning", ...(env.NTFY_TOKEN ? { Authorization: `Bearer ${env.NTFY_TOKEN}` } : {}) },
+    body: problems.map((p) => `⚠️ ${p}`).join("\n").slice(0, 3000),
+  }).catch(() => undefined);
+}
+
+/** Asks the live bot one question as a test visitor (owner pass: no Turnstile, no alerts); returns a problem or null. */
+async function askLiveBot(server: string, question: string): Promise<string | null> {
+  const origin = (cfg.site.origins as string[] | undefined)?.find((o) => o.startsWith("https://dev.")) ?? (cfg.site.origins as string[] | undefined)?.[0];
+  if (!origin) return "no site origin to test from";
+  const passRes = await serverFetch(`${server}/api/dev-pass`, { headers: { Authorization: `Bearer ${need("API_TOKEN")}` } });
+  const { pass } = (await passRes.json()) as { pass: string };
+  const sRes = await serverFetch(`${server}/api/session`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Origin: origin },
+    body: JSON.stringify({ site: cfg.site.key, newChat: true, page: { url: `${origin}/`, title: "Home", referrer: "" }, device: { width: 1280, touch: false, lang: "en", tz: "UTC" }, dev: { brain: "real", pass } }),
+  });
+  const s = (await sRes.json()) as { token?: string; wsUrl?: string };
+  if (!s.token) return `test session failed (HTTP ${sRes.status})`;
+  const wsBase = server.replace(/^http/, "ws");
+  return new Promise((done) => {
+    const ws = new WebSocket(`${wsBase}${s.wsUrl}?token=${encodeURIComponent(s.token!)}&page=/`, { headers: { Origin: origin }, ...(pinned ? { dispatcher: pinned } : {}) });
+    const timer = setTimeout(() => finish("the live bot didn't answer within 70 s"), 70_000);
+    const finish = (problem: string | null) => {
+      clearTimeout(timer);
+      try {
+        ws.close();
+      } catch {
+        // already closed
+      }
+      done(problem);
+    };
+    ws.onopen = () => ws.send(JSON.stringify({ t: "send", id: `m${Date.now()}`, text: question }));
+    ws.onerror = () => finish("couldn't connect to the live bot");
+    ws.onmessage = (e) => {
+      const d = String(e.data);
+      if (d.startsWith("D") || d.startsWith("B")) return;
+      const m = JSON.parse(d) as { t: string; status?: { mode?: string }; message?: { role: string; text: string } };
+      if (m.t === "status" && m.status?.mode === "form") finish("the live bot gave no answer (contact form shown)");
+      if (m.t === "message" && m.message?.role === "ai") finish(m.message.text.trim().length > 20 ? null : "the live bot's answer was empty");
+    };
+  });
+}
+
 // ---------- main ----------
 
 async function main(): Promise<void> {
   const files = await collect();
+  const problems: string[] = [];
+  const warnings: string[] = [];
   console.log(`${files.length} files for store "${cfg.site.storeName}"`);
+  if (skippedPaths.length) warnings.push(`${skippedPaths.length} live page(s) couldn't be fetched; their old copies were kept`);
   if (dryRun) {
     for (const f of files) console.log(`  ${f.path}  (${f.body.length} chars)  ${f.body.split("\n", 1)[0]}`);
     const show = opt("--show");
     const hit = show && files.find((f) => f.path === show || f.path === `${show}.md` || f.path.endsWith(`/${show}`) || f.path.endsWith(`/${show}.md`));
     if (hit) console.log(`\n----- ${hit.path} -----\n${hit.body}`);
+    if (show === "sitemap") console.log(`\n----- site map -----\n${siteMap(files)}`);
+    const pre = preflight(files, 0);
+    if (pre.length) console.log(`\nchecks would stop a real sync:\n  ${pre.join("\n  ")}`);
   } else {
     let store = await storeId(cfg.site.storeName);
     if (!store) {
@@ -329,6 +439,15 @@ async function main(): Promise<void> {
       if (!store) throw new Error(`creating the store failed: HTTP ${r.status} ${JSON.stringify(r.data)}`);
       console.log(`created store ${store}`);
     }
+    const before = (await listAll(store)).map((p) => p.replace(/^\/+/, ""));
+    const pre = preflight(files, before.length);
+    if (pre.length && !force) {
+      console.log(`\nSYNC FAILED before changing the store (run again with --force to override):\n  ${pre.join("\n  ")}`);
+      await alertFailure(pre);
+      process.exit(1);
+    }
+    warnings.push(...pre.map((p) => `forced past: ${p}`));
+
     const counts = { written: 0, updated: 0, same: 0 };
     for (const [i, f] of files.entries()) {
       counts[await put(store, f)]++;
@@ -336,10 +455,14 @@ async function main(): Promise<void> {
     }
     console.log(`store: ${counts.written + counts.same} new or unchanged, ${counts.updated} changed`);
 
-    const keep = new Set(files.map((f) => f.path.replace(/^\/+/, "")));
-    const stale = (await listAll(store)).map((p) => p.replace(/^\/+/, "")).filter((p) => !keep.has(p));
+    // Removal comes only after every upload succeeded (put throws otherwise), never for pages skipped this run.
+    const keep = new Set([...files.map((f) => f.path.replace(/^\/+/, "")), ...skippedPaths]);
+    const stale = before.filter((p) => !keep.has(p));
+    const pruneLimit = Math.max(5, Math.round(files.length * 0.1));
     if (stale.length) {
-      if (flag("--prune")) {
+      if ((flag("--prune") || live) && stale.length > pruneLimit && !force) {
+        warnings.push(`${stale.length} files are no longer on the site; not removed (more than ${pruneLimit}; check them, then run with --force): ${stale.slice(0, 8).join(", ")}`);
+      } else if (flag("--prune") || live) {
         for (const p of stale) {
           const r = await omnara("DELETE", `/memory-stores/${store}/file?path=${encodeURIComponent(p)}`);
           if (r.status === 409) {
@@ -353,27 +476,62 @@ async function main(): Promise<void> {
         for (const p of stale) console.log(`  ${p}`);
       }
     }
+
+    // Afterwards: every file is in the store, and a few read back exactly as written.
+    const after = new Set((await listAll(store)).map((p) => p.replace(/^\/+/, "")));
+    const missing = files.filter((f) => !after.has(f.path.replace(/^\/+/, "")));
+    if (missing.length) problems.push(`${missing.length} file(s) missing from the store after the upload: ${missing.slice(0, 5).map((f) => f.path).join(", ")}`);
+    for (const f of [...files].sort(() => Math.random() - 0.5).slice(0, 3)) {
+      const res = await fetch(`${OMNARA}/orgs/${need("OMNARA_ORG_ID")}/projects/${need("OMNARA_PROJECT_ID")}/memory-stores/${store}/file?path=${encodeURIComponent(f.path)}`, {
+        headers: { Authorization: `Bearer ${need("OMNARA_API_KEY")}`, "User-Agent": "website-chatbot-kb-sync/0.1" },
+      });
+      if (!res.ok || (await res.text()).trim() !== f.body.trim()) problems.push(`${f.path} didn't read back as written (HTTP ${res.status})`);
+    }
   }
 
-  if (flag("--no-push")) return;
-  const instruction = readFileSync(resolve(base, cfg.instructionFile), "utf8");
-  const site = { ...cfg.site, instruction };
-  const server = (env.CHATBOT_SERVER ?? env.PUBLIC_URL ?? "").replace(/\/$/, "");
-  if (!server) throw new Error("Missing CHATBOT_SERVER (or PUBLIC_URL)");
-  if (dryRun) {
-    console.log(`would push site config "${cfg.site.key}" to ${server}`);
-    return;
+  if (!flag("--no-push")) {
+    const instruction = readFileSync(resolve(base, cfg.instructionFile), "utf8");
+    const site = { ...cfg.site, instruction, siteMap: siteMap(files) };
+    const server = (env.CHATBOT_SERVER ?? env.PUBLIC_URL ?? "").replace(/\/$/, "");
+    if (!server) throw new Error("Missing CHATBOT_SERVER (or PUBLIC_URL)");
+    if (dryRun) {
+      console.log(`would push site config "${cfg.site.key}" to ${server} (site map: ${files.length} lines)`);
+      return;
+    }
+    const res = await serverFetch(`${server}/api/sync/site`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${need("API_TOKEN")}`, "Content-Type": "application/json" },
+      body: JSON.stringify(site),
+    });
+    if (res.ok) console.log(`pushed site config "${cfg.site.key}" to ${server}`);
+    else problems.push(`config push failed: HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
+
+    if (live && res.ok) {
+      const question = (cfg.site.starters as { path: string; prompts: string[] }[] | undefined)?.find((s) => s.path === "/")?.prompts[0] ?? `What is ${cfg.site.name}?`;
+      console.log(`asking the live bot: "${question}"`);
+      const p = await askLiveBot(server, question);
+      if (p) problems.push(p);
+      else console.log("the live bot answered");
+    }
   }
-  const res = await fetch(`${server}/api/sync/site`, {
-    method: "PUT",
-    headers: { Authorization: `Bearer ${need("API_TOKEN")}`, "Content-Type": "application/json" },
-    body: JSON.stringify(site),
-  });
-  console.log(res.ok ? `pushed site config "${cfg.site.key}" to ${server}` : `push failed: HTTP ${res.status} ${await res.text()}`);
-  if (!res.ok) process.exitCode = 1;
+
+  if (dryRun) return;
+  for (const w of warnings) console.log(`warning: ${w}`);
+  if (problems.length) {
+    console.log(`\nSYNC FAILED:\n  ${problems.join("\n  ")}`);
+    await alertFailure(problems);
+    process.exitCode = 1;
+  } else {
+    console.log(`\nSYNC OK${warnings.length ? ` (${warnings.length} warning${warnings.length === 1 ? "" : "s"})` : ""}`);
+  }
 }
 
-main().catch((e: unknown) => {
-  console.error(e instanceof Error ? e.message : e);
-  process.exit(1);
-});
+main().then(
+  () => process.exit(process.exitCode ?? 0),
+  async (e: unknown) => {
+    const why = e instanceof Error ? e.message : String(e);
+    console.error(`\nSYNC FAILED: ${why}`);
+    await alertFailure([why]);
+    process.exit(1);
+  },
+);
