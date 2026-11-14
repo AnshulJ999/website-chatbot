@@ -131,9 +131,9 @@ const root = document.documentElement;
 
 // ---- Test setup (panel) state ----
 
-const PG_KEYS = ["site", "page", "theme", "device", "brain", "model", "effort", "scenario", "cpu", "cutoff", "state"] as const;
+const PG_KEYS = ["site", "page", "theme", "device", "brain", "owner", "model", "effort", "scenario", "cpu", "cutoff", "state"] as const;
 type PgKey = (typeof PG_KEYS)[number];
-const PG_DEFAULTS: Record<PgKey, string> = { site: "kopialens", page: "", theme: "", device: "desktop", brain: "scripted", model: "", effort: "high", scenario: "none", cpu: "0", cutoff: "0", state: "live" };
+const PG_DEFAULTS: Record<PgKey, string> = { site: "kopialens", page: "", theme: "", device: "desktop", brain: "scripted", owner: "0", model: "", effort: "high", scenario: "none", cpu: "0", cutoff: "0", state: "live" };
 const pgStore = (k: PgKey) => `wcb-pg-${k}`;
 
 function readPg(k: PgKey): string {
@@ -331,6 +331,7 @@ function renderPanel(): void {
     segmented("Screen", [opt("desktop", "Desktop"), opt("phone", "Phone")], root.dataset.pgDevice ?? "desktop", reload("device")),
     h("p", { class: "pg-group", text: "Answers" }),
     segmented("Brain", [opt("scripted", "Scripted"), opt("real", "Real (Omnara)")], root.dataset.pgBrain ?? "scripted", live("brain"), "Scripted is free and repeatable. Real uses Omnara credits."),
+    segmented("Owner mode", [opt("0", "Off"), opt("1", "On")], scripted ? "0" : (root.dataset.pgOwner ?? "0"), live("owner"), scripted ? "Only with the real brain." : "The bot knows it's you and talks openly about its instructions, tools and files. A change starts a new chat."),
     select("model", "Model", MODELS, scripted ? "" : (root.dataset.pgModel ?? ""), live("model"), scripted ? "Only with the real brain." : "Answer with one model only, to compare how each feels. A change starts a new chat."),
     select("effort", "Effort", EFFORTS, root.dataset.pgEffort ?? "high", live("effort"), "How hard the chosen model thinks. DeepSeek supports High and Low only."),
     select("scenario", "Scenario", SCENARIOS, scripted ? (root.dataset.pgScenario ?? "none") : "none", live("scenario"), scripted ? "Forces a failure on the next answer." : "Only with the scripted brain."),

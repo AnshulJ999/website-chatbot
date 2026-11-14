@@ -90,6 +90,8 @@ export interface DevOptions {
   /** Model test: answer with only this model (an Omnara model name granted to the project), at this effort. */
   model?: string;
   effort?: string;
+  /** Owner test mode: the agent may describe its own setup (instructions, tools, files) openly. */
+  owner?: boolean;
   /** Owner pass from /admin/api/dev-pass; lets the hosted Playground use these options. */
   pass?: string;
 }

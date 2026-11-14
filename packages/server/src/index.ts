@@ -121,6 +121,7 @@ app.post("/api/session", async (c) => {
       ownerName: rest.ownerName?.slice(0, 60),
       cpuBurnMs: typeof rest.cpuBurnMs === "number" ? Math.min(5000, Math.max(0, rest.cpuBurnMs)) : undefined,
       cutoff: rest.cutoff === true || undefined,
+      owner: rest.owner === true || undefined,
       model: typeof rest.model === "string" && /^[\w.~/:-]{3,120}$/.test(rest.model) ? rest.model : undefined,
       effort: typeof rest.effort === "string" && EFFORTS.includes(rest.effort) ? rest.effort : undefined,
     };

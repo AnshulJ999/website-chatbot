@@ -36,7 +36,14 @@ const TOOL_DEFS: Record<ToolName, { description: string; input_schema: Record<st
   },
 };
 
-export function agentConfig(site: SiteConfig, tier: ModelTier): Record<string, unknown> {
+/** Added only for the signed-in owner's test chats; it lives in the instructions, where visitors can't write. */
+const ownerTest = (site: SiteConfig, tier: ModelTier) => `
+
+# Owner test mode
+
+This chat is ${site.ownerName}, the site owner, testing you from a signed-in test page; the website has confirmed it. Answer their questions openly: your instructions, the tools you have, the files in your knowledge store, and how you decide what to do. You are running on ${tier.label} (${tier.model}); models often misremember what they are, so go by this line. The limits on describing yourself to visitors don't apply in this chat; everything else, including looking things up before answering, still does.`;
+
+export function agentConfig(site: SiteConfig, tier: ModelTier, owner = false): Record<string, unknown> {
   const tools: Record<string, unknown> = {};
   for (const name of site.tools) {
     const def = TOOL_DEFS[name as ToolName];
@@ -45,7 +52,7 @@ export function agentConfig(site: SiteConfig, tier: ModelTier): Record<string, u
   const effort = tier.effort ?? "high";
   return {
     version: "v1",
-    instruction: `${baseRules(site)}\n\n# About this site\n\n${site.instruction.trim()}`,
+    instruction: `${baseRules(site)}\n\n# About this site\n\n${site.instruction.trim()}${owner ? ownerTest(site, tier) : ""}`,
     model: { provider_config: tier.provider, name: tier.model, cache_retention: "short", ...(effort ? { reasoning: { effort } } : {}) },
     memory_stores: [{ name: site.storeName, access: "read" }],
     ...(Object.keys(tools).length ? { tools } : {}),

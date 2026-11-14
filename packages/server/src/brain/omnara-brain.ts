@@ -21,7 +21,7 @@ export class OmnaraBrain implements Brain {
 
   async turn(state: BrainState, req: TurnRequest, cb: TurnCallbacks): Promise<TurnResult> {
     const actor: Actor | undefined = this.useActor ? { provider_tenant_id: req.site.key, provider_user_id: req.visitorId } : undefined;
-    const config = agentConfig(req.site, req.tier);
+    const config = agentConfig(req.site, req.tier, req.ownerTest);
     const launch = async () => {
       state.agentId = await this.api.launch({ name: `${req.site.key} chat`, config, text: req.text, actor, key: req.key });
       state.lastSeq = 0;

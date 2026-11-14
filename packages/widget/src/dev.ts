@@ -49,6 +49,7 @@ export function initDev(_host: HTMLElement, opts: WidgetOptions, client: ChatCli
       ...(d.pgBrain === "real" && Number(d.pgCpu) > 0 ? { cpuBurnMs: Number(d.pgCpu) } : {}),
       ...(d.pgBrain === "real" && d.pgCutoff === "1" ? { cutoff: true } : {}),
       ...(d.pgBrain === "real" && d.pgModel ? { model: d.pgModel, effort: d.pgEffort ?? "high" } : {}),
+      ...(d.pgBrain === "real" && d.pgOwner === "1" ? { owner: true } : {}),
       ...(ownerName ? { ownerName } : {}),
     };
     const key = JSON.stringify(dev);

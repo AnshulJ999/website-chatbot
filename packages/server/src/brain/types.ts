@@ -28,6 +28,8 @@ export interface TurnRequest {
   tier: ModelTier;
   streaming: boolean;
   signal: AbortSignal;
+  /** The signed-in owner is testing from the Playground: the agent may talk openly about its setup. */
+  ownerTest?: boolean;
 }
 
 export interface TurnCallbacks {
