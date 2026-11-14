@@ -1,37 +1,52 @@
 import { DurableObject } from "cloudflare:workers";
-import type { HubMsg } from "@website-chatbot/shared";
-import { getChatSummary } from "./db";
+import type { HubIn, HubMsg } from "@website-chatbot/shared";
+import { getChatSummary, getSettings } from "./db";
 import type { Env } from "./env";
 
-/** How long after the last open inbox tab goes quiet the owner still counts as present. */
-const PRESENCE_GRACE_MS = 10 * 60_000;
+/** What an inbox tab last reported: when the owner was last active on that device (0 = idle or locked). */
+type Attachment = { lastActive: number };
 
-/** One instance ("hub"): pushes chat and enquiry changes to open inbox tabs, and knows whether one is open. */
+/**
+ * One instance ("hub"): pushes chat and enquiry changes to open inbox tabs, and tracks whether the owner is around.
+ * Each tab reports activity; a closed tab's last activity still counts until it expires (a phone that just locked).
+ */
 export class Hub extends DurableObject<Env> {
   override async fetch(req: Request): Promise<Response> {
     if (req.headers.get("Upgrade") !== "websocket") return new Response("expected websocket", { status: 426 });
     const pair = new WebSocketPair();
     this.ctx.acceptWebSocket(pair[1]);
-    await this.seen();
+    pair[1].serializeAttachment({ lastActive: 0 } satisfies Attachment);
     return new Response(null, { status: 101, webSocket: pair[0] });
   }
 
   override async webSocketMessage(ws: WebSocket, data: string | ArrayBuffer): Promise<void> {
-    if (data === '{"t":"ping"}') {
-      ws.send(JSON.stringify({ t: "pong" } satisfies HubMsg));
-      await this.seen();
+    if (typeof data !== "string") return;
+    let m: HubIn;
+    try {
+      m = JSON.parse(data) as HubIn;
+    } catch {
+      return;
+    }
+    if (m.t === "ping") ws.send(JSON.stringify({ t: "pong" } satisfies HubMsg));
+    if (m.t === "activity") {
+      ws.serializeAttachment({ lastActive: m.state === "active" ? Date.now() : 0 } satisfies Attachment);
+      await this.broadcastPresence();
     }
   }
 
-  override async webSocketClose(): Promise<void> {
-    await this.seen();
+  override async webSocketClose(ws: WebSocket): Promise<void> {
+    const last = (ws.deserializeAttachment() as Attachment | null)?.lastActive ?? 0;
+    const kept = (await this.ctx.storage.get<number>("closedActive")) ?? 0;
+    if (last > kept) await this.ctx.storage.put("closedActive", last);
   }
 
-  /** True while an inbox tab is open, or was within the grace period (a phone that just locked). */
+  /** Whether visitors see the owner as online: "available" or "away" as set in the inbox, or in "auto" recent activity on any device. */
   async ownerPresent(): Promise<boolean> {
-    if (this.ctx.getWebSockets().length) return true;
-    const last = (await this.ctx.storage.get<number>("lastSeen")) ?? 0;
-    return Date.now() - last < PRESENCE_GRACE_MS;
+    const s = await getSettings(this.env.DB);
+    if (s.presence !== "auto") return s.presence === "available";
+    let last = (await this.ctx.storage.get<number>("closedActive")) ?? 0;
+    for (const ws of this.ctx.getWebSockets()) last = Math.max(last, (ws.deserializeAttachment() as Attachment | null)?.lastActive ?? 0);
+    return Date.now() - last < s.awayAfterMin * 60_000;
   }
 
   async chat(id: string): Promise<void> {
@@ -46,10 +61,11 @@ export class Hub extends DurableObject<Env> {
 
   async settings(): Promise<void> {
     this.send({ t: "settings" });
+    await this.broadcastPresence();
   }
 
-  private seen(): Promise<void> {
-    return this.ctx.storage.put("lastSeen", Date.now());
+  private async broadcastPresence(): Promise<void> {
+    this.send({ t: "presence", online: await this.ownerPresent() });
   }
 
   private send(msg: HubMsg): void {

@@ -1,4 +1,4 @@
-import { DEFAULT_SETTINGS, type ChatSummary, type Enquiry, type Settings, type SiteConfig } from "@website-chatbot/shared";
+import { DEFAULT_SETTINGS, SLOW_ANSWER_MS, type AnswerStats, type ChatSummary, type Enquiry, type Settings, type SiteConfig } from "@website-chatbot/shared";
 
 export const today = (now = Date.now()) => new Date(now).toISOString().slice(0, 10);
 
@@ -110,6 +110,7 @@ export interface ChatRow {
   thumbs_down: number;
   created_at: number;
   updated_at: number;
+  owner_at: number | null;
 }
 
 const SUMMARY_SQL = `SELECT c.*, v.country, v.city, v.device, v.email, v.name FROM chats c LEFT JOIN visitors v ON v.id = c.visitor_id`;
@@ -137,6 +138,7 @@ export function toSummary(r: ChatRow & { country?: string | null; city?: string 
     unread: r.unread,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
+    ownerAt: r.owner_at ?? undefined,
   };
 }
 
@@ -281,12 +283,72 @@ export async function stats(db: D1Database, days = 14) {
     db.prepare("SELECT date(created_at / 1000, 'unixepoch') AS day, site, COUNT(*) AS n FROM enquiries WHERE created_at >= ? GROUP BY day, site ORDER BY day").bind(since),
     db.prepare("SELECT COALESCE(SUM(thumbs_up), 0) AS up, COALESCE(SUM(thumbs_down), 0) AS down FROM chats WHERE created_at >= ?").bind(since),
   ]);
-  return { spend: spend?.results ?? [], chats: chats?.results ?? [], enquiries: enquiries?.results ?? [], thumbs: thumbs?.results?.[0] ?? { up: 0, down: 0 } };
+  return {
+    spend: spend?.results ?? [],
+    chats: chats?.results ?? [],
+    enquiries: enquiries?.results ?? [],
+    thumbs: thumbs?.results?.[0] ?? { up: 0, down: 0 },
+    answers: await answerStats(db, since),
+  };
+}
+
+const pct = (sorted: number[], p: number) => (sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))]! : null);
+
+/** Answer timings and outcomes since a moment, plus logged problems in the same period. */
+export async function answerStats(db: D1Database, since: number): Promise<AnswerStats> {
+  const [rows, incidents] = await db.batch([
+    db.prepare("SELECT model, outcome, first_word_ms, total_ms, lookups, failed_attempts FROM answers WHERE at >= ? AND outcome != 'owner'").bind(since),
+    db.prepare("SELECT kind, COUNT(*) AS n FROM incidents WHERE at >= ? GROUP BY kind").bind(since),
+  ]);
+  const list = (rows?.results ?? []) as { model: string | null; outcome: string; first_word_ms: number | null; total_ms: number; lookups: number; failed_attempts: number }[];
+  const times = (xs: typeof list) => xs.map((r) => r.total_ms).sort((a, b) => a - b);
+  const ok = list.filter((r) => r.outcome === "ok");
+  const words = list.flatMap((r) => (r.first_word_ms == null ? [] : [r.first_word_ms])).sort((a, b) => a - b);
+  const models = new Map<string, typeof list>();
+  for (const r of ok) models.set(r.model ?? "unknown", [...(models.get(r.model ?? "unknown") ?? []), r]);
+  const problems: Record<string, number> = {};
+  for (const r of (incidents?.results ?? []) as { kind: string; n: number }[]) problems[r.kind] = r.n;
+  return {
+    answers: list.length,
+    ok: ok.length,
+    partial: list.filter((r) => r.outcome === "partial").length,
+    noAnswer: list.filter((r) => r.outcome === "form").length,
+    switched: ok.filter((r) => r.failed_attempts > 0).length,
+    slow: list.filter((r) => r.total_ms > SLOW_ANSWER_MS).length,
+    medianMs: pct(times(ok), 0.5),
+    p90Ms: pct(times(ok), 0.9),
+    medianFirstWordMs: pct(words, 0.5),
+    lookupsPerAnswer: list.length ? Math.round((list.reduce((t, r) => t + r.lookups, 0) / list.length) * 10) / 10 : null,
+    byModel: [...models.entries()].map(([model, xs]) => ({ model, answers: xs.length, medianMs: pct(times(xs), 0.5) })),
+    problems,
+  };
 }
 
 // Incidents: a durable log of failures, for alerts and later investigation.
 
-export type IncidentKind = "attempt_failed" | "turn_failed" | "turn_interrupted" | "alert_failed" | "mail_failed";
+export type IncidentKind = "attempt_failed" | "turn_failed" | "turn_interrupted" | "answer_partial" | "alert_failed" | "mail_failed";
+
+export interface AnswerRecord {
+  site: string;
+  chatId: string;
+  model: string | null;
+  outcome: string;
+  firstPieceMs: number | null;
+  firstWordMs: number | null;
+  totalMs: number;
+  lookups: number;
+  failedAttempts: number;
+  costUsd: number | null;
+}
+
+export async function recordAnswer(db: D1Database, a: AnswerRecord): Promise<void> {
+  await db
+    .prepare(
+      "INSERT INTO answers (at, site, chat_id, model, outcome, first_piece_ms, first_word_ms, total_ms, lookups, failed_attempts, cost_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(Date.now(), a.site, a.chatId, a.model, a.outcome, a.firstPieceMs, a.firstWordMs, a.totalMs, a.lookups, a.failedAttempts, a.costUsd)
+    .run();
+}
 
 export async function logIncident(db: D1Database, i: { site: string; chatId?: string; kind: IncidentKind; model?: string; detail: string }): Promise<void> {
   await db

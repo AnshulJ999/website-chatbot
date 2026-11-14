@@ -1,4 +1,4 @@
-import type { ChatMessage, ChatStatus, ChatSummary, Enquiry, HubMsg, OwnerMsg, ServerMsg, Settings } from "@website-chatbot/shared";
+import type { AnswerStats, ChatMessage, ChatStatus, ChatSummary, Enquiry, HubMsg, OwnerMsg, ServerMsg, Settings } from "@website-chatbot/shared";
 
 const BASE = `${import.meta.env.BASE_URL}api`;
 
@@ -19,6 +19,7 @@ export interface Overview {
   spendTodayUsd: number;
   sites: { key: string; name: string }[];
   modelHealth: { model: string; failures: number; last_failure: number | null; cooldown_until: number | null }[];
+  ownerOnline: boolean;
 }
 
 export interface ChatDetail {
@@ -32,6 +33,7 @@ export interface Stats {
   chats: { day: string; site: string; n: number; messages: number }[];
   enquiries: { day: string; site: string; n: number }[];
   thumbs: { up: number; down: number };
+  answers: AnswerStats;
 }
 
 export const api = {

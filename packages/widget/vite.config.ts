@@ -11,6 +11,7 @@ export default defineConfig(({ command, mode }) => {
     plugins: [preact()],
     define: { __WCB_PLAYGROUND__: JSON.stringify(playground) },
     root: playground ? resolve(__dirname, "playground") : __dirname,
+    envDir: __dirname,
     base: mode === "playground" ? "/playground/" : "/",
     server: { fs: { allow: [resolve(__dirname, "../..")] }, cors: true },
     build:

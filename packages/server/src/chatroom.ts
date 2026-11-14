@@ -86,6 +86,18 @@ interface RoomState {
 
 type Socket = { role: "visitor" | "owner" };
 
+/** Timing of the answer in progress (milliseconds since epoch), saved to the answers table when it ends. */
+interface TurnStats {
+  start: number;
+  firstPiece?: number;
+  firstWord?: number;
+  lookups: number;
+  failedAttempts: number;
+  stillShown?: boolean;
+  model?: string;
+  costUsd?: number;
+}
+
 const RETRY_NOTE = "[The previous answer was interrupted. Please answer the visitor's last message again.]";
 
 /** CPU test only: a fixed amount of work, since the clock doesn't move during pure computation in Workers. */
@@ -107,6 +119,9 @@ export class ChatRoom extends DurableObject<Env> {
   private lastTouch = 0;
   private deltaBuf: string[] = [];
   private deltaTimer?: ReturnType<typeof setTimeout>;
+  private turn?: TurnStats;
+  /** Raw visible-text frames of the current attempt; parsed only when an unfinished answer is kept. */
+  private partial: string[] = [];
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -297,6 +312,12 @@ export class ChatRoom extends DurableObject<Env> {
     const cooling = await db.coolingModels(this.env.DB);
     let tiers = settings.ladder.filter((t) => t.enabled && !cooling.has(t.model));
     if (freeOnly) tiers = tiers.filter((t) => t.free);
+    const pick = this.st.dev?.model;
+    if (pick) {
+      // Model test (Playground or test script): this one model only.
+      const known = settings.ladder.find((t) => t.model === pick);
+      tiers = [{ provider: known?.provider ?? "omnara-openrouter", model: pick, label: known?.label ?? pick, free: false, enabled: true, effort: this.st.dev?.effort ?? known?.effort ?? "high" }];
+    }
     if (!tiers.length) {
       // Every tier is cooling down or disabled: try the enabled ones anyway before giving up.
       tiers = settings.ladder.filter((t) => t.enabled && (!freeOnly || t.free));
@@ -307,7 +328,9 @@ export class ChatRoom extends DurableObject<Env> {
     let input = this.composeInput(text);
     this.busy = true;
     this.progress = undefined;
-    // One time limit for the whole answer, however many models it tries.
+    this.turn = { start: Date.now(), lookups: 0, failedAttempts: 0 };
+    let outcome = "failed";
+    // The visitor's whole wait, however many models it tries; each model also has its own limit.
     const deadline = Date.now() + settings.turnTimeoutSec * 1000;
     this.st.turnDeadline = deadline + 30_000;
     await this.save();
@@ -319,40 +342,108 @@ export class ChatRoom extends DurableObject<Env> {
       let attempt = 0;
       tiers: for (const tier of tiers) {
         for (let retry = 0; retry < 2; retry++) {
-          if (this.st.mode !== "ai") return; // the owner took over mid-answer
+          if (this.st.mode !== "ai") {
+            outcome = "owner"; // the owner took over mid-answer
+            return;
+          }
           if (Date.now() >= deadline) break tiers;
           this.st.turnTier = tier;
           this.st.turnQuestion = text.slice(0, 2000);
           await this.save();
+          const attemptDeadline = Math.min(deadline, Date.now() + settings.modelTimeoutSec * 1000);
           try {
-            const result = await this.runAttempt(brain, tier, `${inputId}-${attempt++}`, input, settings, site, deadline);
-            await this.finishTurn(result.text, result.totalCostUsd, tier, site);
+            const result = await this.runAttempt(brain, tier, `${inputId}-${attempt++}`, input, settings, site, attemptDeadline);
+            this.turn.model = tier.label;
+            this.turn.costUsd = await this.finishTurn(result.text, result.totalCostUsd, tier, site);
             void db.recordModelSuccess(this.env.DB, tier.model);
+            outcome = "ok";
             return;
           } catch (e) {
             if (!(e instanceof BrainFailure)) throw e;
-            const kind: FailureKind = Date.now() >= deadline ? "stall" : e.kind;
+            const kind: FailureKind = Date.now() >= attemptDeadline ? "stall" : e.kind;
             console.error("attempt failed", tier.model, kind, e.message);
             failures.push(`${tier.label}: ${kind}`);
+            this.turn.failedAttempts++;
             this.incident(site, "attempt_failed", `${kind}: ${e.message}`, tier.model);
-            this.broadcast({ t: "delta_reset" });
             await brain.cancel(this.st.brain);
             if (e.kind !== "rejected") await db.recordModelFailure(this.env.DB, tier.model, settings);
+            // Words the visitor already saw stay; they can ask again or talk to a person.
+            const shown = this.partialText();
+            if (shown) {
+              this.turn.model = tier.label;
+              await this.keepPartial(shown, tier, site, text, failures);
+              outcome = "partial";
+              return;
+            }
+            this.broadcast({ t: "delta_reset" });
             input = `${RETRY_NOTE}\n\nThe visitor's message: ${text}`;
             // A stalled or unreachable model rarely recovers within seconds: move to the next one.
             if (e.kind === "stall" || e.kind === "unavailable" || e.kind === "rejected") break;
           }
         }
       }
+      outcome = "form";
       await this.toForm("ai_unavailable", settings);
       await this.turnFailed(site, text, failures.length ? failures : ["no model answered in time"]);
     } catch (e) {
       console.error("answer", e);
+      outcome = "form";
       await this.toForm("ai_unavailable", settings);
       await this.turnFailed(site, text, [...failures, `server error: ${e instanceof Error ? e.message : String(e)}`]);
     } finally {
+      this.recordTurn(site, outcome);
       await this.endTurn(settings);
     }
+  }
+
+  /** Ends an answer that stopped after the visitor saw part of it: keeps those words and offers the next step. */
+  private async keepPartial(shown: string, tier: ModelTier, site: SiteConfig, question: string, failures: string[]): Promise<void> {
+    this.add({ id: newId("m"), role: "ai", text: splitSuggestions(shown).text, meta: { model: tier.label, costUsd: 0 } });
+    const talk = site.talkLabel.charAt(0).toLowerCase() + site.talkLabel.slice(1);
+    this.add({ id: newId("m"), role: "system", text: `The answer stopped early. Ask again, or ${talk}.` });
+    await db.logIncident(this.env.DB, { site: site.key, chatId: this.st.chatId, kind: "answer_partial", model: tier.model, detail: `${failures.join("; ")} | ${question.slice(0, 300)}` });
+  }
+
+  /** Visible words of the current attempt, rebuilt from the raw frames kept while streaming. */
+  private partialText(): string {
+    let text = "";
+    let ctx: string | undefined;
+    for (const raw of this.partial) {
+      try {
+        const f = JSON.parse(raw) as { model_call_context_id?: string; event?: { kind?: string; delta?: string } };
+        if (f.event?.kind !== "text_delta" || !f.event.delta) continue;
+        if (f.model_call_context_id !== ctx) text = "";
+        ctx = f.model_call_context_id;
+        text += f.event.delta;
+      } catch {
+        // skip a malformed frame
+      }
+    }
+    return text.trim();
+  }
+
+  /** Saves the timing of the answer that just ended; never blocks the chat. */
+  private recordTurn(site: SiteConfig, outcome: string): void {
+    const t = this.turn;
+    this.turn = undefined;
+    this.partial = [];
+    if (!t) return;
+    const since = (at?: number) => (at ? at - t.start : null);
+    const p = db
+      .recordAnswer(this.env.DB, {
+        site: site.key,
+        chatId: this.st.chatId,
+        model: t.model ?? null,
+        outcome,
+        firstPieceMs: since(t.firstPiece),
+        firstWordMs: since(t.firstWord),
+        totalMs: Date.now() - t.start,
+        lookups: t.lookups,
+        failedAttempts: t.failedAttempts,
+        costUsd: t.costUsd ?? null,
+      })
+      .catch((e) => console.error("answers", e));
+    this.ctx.waitUntil(p);
   }
 
   private async endTurn(settings: Settings): Promise<void> {
@@ -466,25 +557,39 @@ export class ChatRoom extends DurableObject<Env> {
     this.abort = abort;
     let last = Date.now();
     this.lastTouch = last;
+    this.partial = [];
     const timer = setInterval(() => {
       const now = Date.now();
       if (now - last > settings.stallTimeoutSec * 1000 || now >= deadline) abort.abort();
+      const t = this.turn;
+      if (t && !t.firstWord && !t.stillShown && now - t.start >= settings.stillWorkingSec * 1000) {
+        t.stillShown = true;
+        this.progress = "Still working on it";
+        this.broadcastStatus(settings);
+      }
     }, 1000);
     if (this.env.CPU_TEST === "1" && this.st.dev?.cpuBurnMs) burnCpu(this.st.dev.cpuBurnMs);
     const req = { text, key, visitorId: this.st.visitorId, site, tier, streaming: settings.streaming && !this.st.noStreaming, signal: abort.signal };
     let deltas = 0;
     const cb = {
-      touch: () => (last = this.lastTouch = Date.now()),
+      touch: () => {
+        last = this.lastTouch = Date.now();
+        if (this.turn) this.turn.firstPiece ??= last;
+      },
       progress: (p: string) => {
         this.progress = p;
+        if (this.turn) this.turn.lookups++;
         this.broadcastStatus(settings);
       },
       delta: (raw: string) => {
+        this.partial.push(raw);
+        if (this.turn) this.turn.firstWord ??= Date.now();
         this.queueDelta(raw, settings.deltaBatchMs);
         // Cut-off test: restart this object mid-answer, the way a CPU-limit kill would.
         if (!resume && this.st.dev?.cutoff && ++deltas === 15) this.ctx.abort("cut-off test");
       },
       deltaReset: () => {
+        this.partial = [];
         this.dropDeltas();
         this.broadcast({ t: "delta_reset" });
       },
@@ -519,7 +624,8 @@ export class ChatRoom extends DurableObject<Env> {
     this.deltaBuf = [];
   }
 
-  private async finishTurn(raw: string, totalCost: number, tier: ModelTier, site: SiteConfig): Promise<void> {
+  /** Saves the finished answer; returns what this answer cost. */
+  private async finishTurn(raw: string, totalCost: number, tier: ModelTier, site: SiteConfig): Promise<number> {
     const { text, suggestions } = splitSuggestions(raw);
     const delta = Number.isFinite(totalCost) ? Math.max(0, totalCost - this.st.costUsd) : 0;
     if (Number.isFinite(totalCost)) this.st.costUsd = Math.max(this.st.costUsd, totalCost);
@@ -527,6 +633,7 @@ export class ChatRoom extends DurableObject<Env> {
     this.add({ id: newId("m"), role: "ai", text, suggestions, meta: { model: tier.label, costUsd: delta } });
     await db.addSpend(this.env.DB, site.key, delta);
     this.index({ cost_usd: this.st.costUsd, model: tier.label, agent_id: this.st.brain.agentId ?? null });
+    return delta;
   }
 
   /** Visitor text plus the context the agent should know about, or a recap when the agent is new. */
@@ -631,7 +738,7 @@ export class ChatRoom extends DurableObject<Env> {
     if (msg.t === "owner_hand_back" && this.st.mode === "owner") {
       this.st.mode = "ai";
       this.st.ownerJoined = false;
-      this.add({ id: newId("m"), role: "system", text: `${site.assistantName} is back` });
+      this.add({ id: newId("m"), role: "system", text: `${cap(site.ownerName)} has left the chat. You're chatting with the AI assistant.` });
     }
     await this.save();
     this.index({ mode: this.st.mode, wants_owner: this.st.wantsOwner ? 1 : 0, unread: 0 });
@@ -810,7 +917,7 @@ export class ChatRoom extends DurableObject<Env> {
   }
 
   private async refreshOnline(settings: Settings): Promise<void> {
-    this.online = settings.ownerOnline && (await this.hub().ownerPresent());
+    this.online = await this.hub().ownerPresent();
   }
 
   /** Sends an alert without blocking the chat; a failed one is logged. */
@@ -907,7 +1014,8 @@ export class ChatRoom extends DurableObject<Env> {
     this.broadcast({ t: "message", message: msg });
     const ownerWatching = this.ctx.getWebSockets("owner").length > 0;
     const unread = m.role === "visitor" && !ownerWatching ? { unread: this.unreadCount() } : {};
-    this.index({ message_count: this.st.seq, preview: `${label(m.role)}: ${m.text}`.slice(0, 160), ...unread });
+    const owner = m.role === "owner" ? { owner_at: msg.at } : {};
+    this.index({ message_count: this.st.seq, preview: `${label(m.role)}: ${m.text}`.slice(0, 160), ...unread, ...owner });
     return msg;
   }
 

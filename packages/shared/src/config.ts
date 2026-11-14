@@ -5,14 +5,21 @@ export interface ModelTier {
   label: string;
   free: boolean;
   enabled: boolean;
+  /** Reasoning effort sent to the model ("high", "medium", "low"); empty = the model's default. Missing = "high". */
+  effort?: string;
 }
 
 export type LimitAction = "free_tier" | "get_in_touch";
 
-/** Global settings, edited in the inbox. Every number here is Anshul's to approve. */
+/** How visitors see the owner: "auto" follows activity reported by open inbox tabs; the others are fixed. */
+export type Presence = "auto" | "available" | "away";
+
+/** Global settings, edited in the inbox. */
 export interface Settings {
   aiEnabled: boolean;
-  ownerOnline: boolean;
+  presence: Presence;
+  /** In "auto": away after this many minutes without activity on any device with the inbox open. */
+  awayAfterMin: number;
   /** true = real word-by-word deltas from Omnara; false = finished answers only. */
   streaming: boolean;
   /** Streaming only: send the words in one message per this many ms; 0 sends each piece as it arrives. */
@@ -24,8 +31,14 @@ export interface Settings {
   budgetAction: LimitAction;
   perVisitorDailyMessages: number;
   maxMessageChars: number;
+  /** Silence: no sign of life at all from the model (thinking, lookups or words) for this long = stuck, try the next model. */
   stallTimeoutSec: number;
+  /** Longest one model may take on one answer. */
+  modelTimeoutSec: number;
+  /** Longest a visitor waits for one answer, across every model tried. */
   turnTimeoutSec: number;
+  /** "Still working on it" shows when no words have appeared after this long. */
+  stillWorkingSec: number;
   cooldownAfterFailures: number;
   cooldownMinutes: number;
   archiveAfterDays: number;
@@ -34,13 +47,14 @@ export interface Settings {
 
 export const DEFAULT_SETTINGS: Settings = {
   aiEnabled: true,
-  ownerOnline: false,
+  presence: "auto",
+  awayAfterMin: 10,
   streaming: true,
   deltaBatchMs: 0,
   ladder: [
-    { provider: "omnara-openrouter", model: "deepseek/deepseek-v4.1-flash-latest", label: "DeepSeek V4.1 Flash", free: false, enabled: true },
-    { provider: "omnara-openrouter", model: "openai/gpt-6-luna", label: "GPT-6 Luna", free: false, enabled: true },
-    { provider: "openrouter-byok", model: "openrouter/free", label: "OpenRouter free (auto)", free: true, enabled: false },
+    { provider: "omnara-openrouter", model: "deepseek/deepseek-v4.1-flash-latest", label: "DeepSeek V4.1 Flash", free: false, enabled: true, effort: "high" },
+    { provider: "omnara-openrouter", model: "openai/gpt-6-luna", label: "GPT-6 Luna", free: false, enabled: true, effort: "high" },
+    { provider: "openrouter-byok", model: "openrouter/free", label: "OpenRouter free (auto)", free: true, enabled: false, effort: "" },
   ],
   chatCapUsd: 0.5,
   capAction: "free_tier",
@@ -48,13 +62,38 @@ export const DEFAULT_SETTINGS: Settings = {
   budgetAction: "get_in_touch",
   perVisitorDailyMessages: 40,
   maxMessageChars: 2000,
-  stallTimeoutSec: 30,
-  turnTimeoutSec: 75,
+  stallTimeoutSec: 15,
+  modelTimeoutSec: 30,
+  turnTimeoutSec: 45,
+  stillWorkingSec: 8,
   cooldownAfterFailures: 3,
   cooldownMinutes: 15,
   archiveAfterDays: 14,
   alertOnNewChat: false,
 };
+
+/** How AI answers went over a period (times in ms). */
+export interface AnswerStats {
+  answers: number;
+  ok: number;
+  /** Stopped early; the words already shown were kept. */
+  partial: number;
+  /** No model answered; the visitor got the contact form. */
+  noAnswer: number;
+  /** Answered, but only after the first model failed. */
+  switched: number;
+  /** Took longer than SLOW_ANSWER_MS. */
+  slow: number;
+  medianMs: number | null;
+  p90Ms: number | null;
+  medianFirstWordMs: number | null;
+  lookupsPerAnswer: number | null;
+  byModel: { model: string; answers: number; medianMs: number | null }[];
+  /** Logged problems by kind: failed attempts, cut-off answers, failed alerts and emails. */
+  problems: Record<string, number>;
+}
+
+export const SLOW_ANSWER_MS = 15_000;
 
 /** CSS expressions resolved against the host page, e.g. "var(--color-primary)" or "hsl(var(--primary))". */
 export interface ThemeMap {

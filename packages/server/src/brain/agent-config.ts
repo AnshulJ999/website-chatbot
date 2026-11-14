@@ -3,7 +3,7 @@ import BASE_RULES from "./base-rules.md";
 
 /** Rules every site's agent gets, ahead of the site's own instruction (base-rules.md, {{placeholders}} filled per site). */
 export function baseRules(site: SiteConfig): string {
-  const vars: Record<string, string> = { assistantName: site.assistantName, siteName: site.name, ownerName: site.ownerName };
+  const vars: Record<string, string> = { assistantName: site.assistantName, siteName: site.name, ownerName: site.ownerName, storeName: site.storeName };
   return BASE_RULES.trim().replace(/\{\{(\w+)\}\}/g, (m, k: string) => vars[k] ?? m);
 }
 
@@ -42,10 +42,11 @@ export function agentConfig(site: SiteConfig, tier: ModelTier): Record<string, u
     const def = TOOL_DEFS[name as ToolName];
     if (def) tools[name] = { type: "custom", ...def };
   }
+  const effort = tier.effort ?? "high";
   return {
     version: "v1",
     instruction: `${baseRules(site)}\n\n# About this site\n\n${site.instruction.trim()}`,
-    model: { provider_config: tier.provider, name: tier.model, cache_retention: "short" },
+    model: { provider_config: tier.provider, name: tier.model, cache_retention: "short", ...(effort ? { reasoning: { effort } } : {}) },
     memory_stores: [{ name: site.storeName, access: "read" }],
     ...(Object.keys(tools).length ? { tools } : {}),
   };

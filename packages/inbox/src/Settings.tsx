@@ -49,6 +49,13 @@ export function Settings({ overview, onSave }: { overview: Overview; onSave: (p:
                 <input aria-label="Label" value={t.label} onChange={(e) => setTier(i, { label: e.target.value })} className="w-40 rounded border border-border bg-panel px-2 py-1 text-sm" />
                 <input aria-label="Model" value={t.model} onChange={(e) => setTier(i, { model: e.target.value })} className="min-w-0 flex-1 rounded border border-border bg-panel px-2 py-1 font-mono text-xs" />
                 <input aria-label="Provider" value={t.provider} onChange={(e) => setTier(i, { provider: e.target.value })} className="w-36 rounded border border-border bg-panel px-2 py-1 font-mono text-xs" title="Omnara provider config name" />
+                <select aria-label="Effort" value={t.effort ?? "high"} onChange={(e) => setTier(i, { effort: e.target.value })} className="rounded border border-border bg-panel px-2 py-1 text-xs" title="Reasoning effort">
+                  <option value="high">Effort: high</option>
+                  <option value="medium">Effort: medium</option>
+                  <option value="low">Effort: low</option>
+                  <option value="none">Effort: none</option>
+                  <option value="">Effort: model default</option>
+                </select>
                 <label className="flex items-center gap-1 text-xs">
                   <input type="checkbox" checked={t.free} onChange={(e) => setTier(i, { free: e.target.checked })} /> Free
                 </label>
@@ -70,7 +77,7 @@ export function Settings({ overview, onSave }: { overview: Overview; onSave: (p:
               </li>
             ))}
           </ol>
-          <Button className="mt-3" onClick={() => set("ladder", [...draft.ladder, { provider: "omnara-openrouter", model: "", label: "New model", free: false, enabled: false }])}>
+          <Button className="mt-3" onClick={() => set("ladder", [...draft.ladder, { provider: "omnara-openrouter", model: "", label: "New model", free: false, enabled: false, effort: "high" }])}>
             <Plus size={14} /> Add model
           </Button>
           <p className="mt-3 text-xs text-muted-fg">
@@ -91,8 +98,11 @@ export function Settings({ overview, onSave }: { overview: Overview; onSave: (p:
           <div className="grid gap-4 sm:grid-cols-2">
             <Num label="Messages per visitor per day" value={draft.perVisitorDailyMessages} onChange={(v) => set("perVisitorDailyMessages", v)} />
             <Num label="Longest visitor message (characters)" value={draft.maxMessageChars} step={100} onChange={(v) => set("maxMessageChars", v)} />
-            <Num label="Give up on a silent answer after (seconds)" value={draft.stallTimeoutSec} onChange={(v) => set("stallTimeoutSec", v)} />
-            <Num label="Time limit for a whole answer, all models included (seconds)" value={draft.turnTimeoutSec} onChange={(v) => set("turnTimeoutSec", v)} />
+            <Num label="Try the next model after this much total silence (seconds)" value={draft.stallTimeoutSec} onChange={(v) => set("stallTimeoutSec", v)} />
+            <Num label="Longest one model may take on an answer (seconds)" value={draft.modelTimeoutSec} onChange={(v) => set("modelTimeoutSec", v)} />
+            <Num label="Longest a visitor waits for an answer, all models included (seconds)" value={draft.turnTimeoutSec} onChange={(v) => set("turnTimeoutSec", v)} />
+            <Num label={'Show "Still working on it" when no words after (seconds)'} value={draft.stillWorkingSec} onChange={(v) => set("stillWorkingSec", v)} />
+            <Num label="Status Auto: show me as away after this many idle minutes" value={draft.awayAfterMin} onChange={(v) => set("awayAfterMin", v)} />
             <Num label="Failures before a cooldown" value={draft.cooldownAfterFailures} onChange={(v) => set("cooldownAfterFailures", v)} />
             <Num label="Cooldown length (minutes)" value={draft.cooldownMinutes} onChange={(v) => set("cooldownMinutes", v)} />
             <Num label="Archive idle chats on Omnara after (days)" value={draft.archiveAfterDays} onChange={(v) => set("archiveAfterDays", v)} />

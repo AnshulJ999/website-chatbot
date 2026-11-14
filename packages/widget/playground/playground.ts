@@ -3,8 +3,9 @@ import { applyTheme } from "../src/theme";
 import { OWNER_NAMES, TALK_WORDING } from "../src/dev-wording";
 
 // The Playground: the real widget on a plain page. Left panel = test setup (data-pg-* on <html>);
-// Design menu = look choices (data-d-*). Notes + Design come from the local notes server.
-const NOTES = "http://127.0.0.1:7790";
+// Design menu = look choices (data-d-*). Optional review tools (Notes, Design menu) load from a notes
+// server when VITE_NOTES_SERVER is set in a local, git-ignored .env.local.
+const NOTES: string = import.meta.env.VITE_NOTES_SERVER ?? "";
 const API = `${NOTES}/api/devnotes/website-chatbot`;
 const FRAME = new URLSearchParams(location.search).has("pg-frame");
 const HOSTED = location.pathname.startsWith("/playground");
@@ -69,6 +70,13 @@ const STATES = [
 const SCENARIOS = [opt("none", "Normal"), opt("fail_first", "First model fails"), opt("slow", "Reply stalls"), opt("omnara_down", "Omnara down"), opt("cap", "Chat over its cap")];
 const CPU_TESTS = [opt("0", "Off"), opt("50", "About 50 ms"), opt("200", "About 200 ms"), opt("1000", "About 1 s")];
 const CUTOFF_TESTS = [opt("0", "Off"), opt("1", "Cut off mid-answer")];
+const MODELS = [
+  opt("", "The model ladder (normal)"),
+  opt("deepseek/deepseek-v4.1-flash-latest", "DeepSeek V4.1 Flash"),
+  opt("openai/gpt-6-luna", "GPT-6 Luna"),
+  opt("anthropic/claude-haiku-5.5", "Claude Haiku 5.5"),
+];
+const EFFORTS = [opt("high", "High"), opt("medium", "Medium"), opt("low", "Low"), opt("none", "None"), opt("", "Model's default")];
 
 const capFirst = (t: string) => t.charAt(0).toUpperCase() + t.slice(1);
 
@@ -123,9 +131,9 @@ const root = document.documentElement;
 
 // ---- Test setup (panel) state ----
 
-const PG_KEYS = ["site", "page", "theme", "device", "brain", "scenario", "cpu", "cutoff", "state"] as const;
+const PG_KEYS = ["site", "page", "theme", "device", "brain", "model", "effort", "scenario", "cpu", "cutoff", "state"] as const;
 type PgKey = (typeof PG_KEYS)[number];
-const PG_DEFAULTS: Record<PgKey, string> = { site: "kopialens", page: "", theme: "", device: "desktop", brain: "scripted", scenario: "none", cpu: "0", cutoff: "0", state: "live" };
+const PG_DEFAULTS: Record<PgKey, string> = { site: "kopialens", page: "", theme: "", device: "desktop", brain: "scripted", model: "", effort: "high", scenario: "none", cpu: "0", cutoff: "0", state: "live" };
 const pgStore = (k: PgKey) => `wcb-pg-${k}`;
 
 function readPg(k: PgKey): string {
@@ -199,6 +207,7 @@ const noteContext = () => ({
 });
 
 function startNotes(onReady: (api: NotesApi | null) => void): void {
+  if (!NOTES) return onReady(null);
   window.addEventListener(
     "notes-loaded",
     () => {
@@ -322,6 +331,8 @@ function renderPanel(): void {
     segmented("Screen", [opt("desktop", "Desktop"), opt("phone", "Phone")], root.dataset.pgDevice ?? "desktop", reload("device")),
     h("p", { class: "pg-group", text: "Answers" }),
     segmented("Brain", [opt("scripted", "Scripted"), opt("real", "Real (Omnara)")], root.dataset.pgBrain ?? "scripted", live("brain"), "Scripted is free and repeatable. Real uses Omnara credits."),
+    select("model", "Model", MODELS, scripted ? "" : (root.dataset.pgModel ?? ""), live("model"), scripted ? "Only with the real brain." : "Answer with one model only, to compare how each feels. A change starts a new chat."),
+    select("effort", "Effort", EFFORTS, root.dataset.pgEffort ?? "high", live("effort"), "How hard the chosen model thinks. DeepSeek supports High and Low only."),
     select("scenario", "Scenario", SCENARIOS, scripted ? (root.dataset.pgScenario ?? "none") : "none", live("scenario"), scripted ? "Forces a failure on the next answer." : "Only with the scripted brain."),
     select("cpu", "CPU test", CPU_TESTS, scripted ? "0" : (root.dataset.pgCpu ?? "0"), live("cpu"), scripted ? "Only with the real brain." : "Burns this much server CPU once per answer, to see what Cloudflare does past its limit. Works only while the server has CPU_TEST=1."),
     select("cutoff", "Cut-off test", CUTOFF_TESTS, scripted ? "0" : (root.dataset.pgCutoff ?? "0"), live("cutoff"), scripted ? "Only with the real brain." : "Drops the chat on the server partway through the next answer, like a Cloudflare cut-off. The full answer should still arrive."),
@@ -336,7 +347,9 @@ function renderPanel(): void {
   body.scrollTop = keep;
   const scenario = body.querySelector<HTMLSelectElement>("#pg-scenario");
   if (scenario) scenario.disabled = !scripted;
-  for (const id of ["#pg-cpu", "#pg-cutoff"]) {
+  const effort = body.querySelector<HTMLSelectElement>("#pg-effort");
+  if (effort) effort.disabled = scripted || !root.dataset.pgModel;
+  for (const id of ["#pg-cpu", "#pg-cutoff", "#pg-model"]) {
     const el = body.querySelector<HTMLSelectElement>(id);
     if (el) el.disabled = scripted;
   }
@@ -430,12 +443,14 @@ async function main(): Promise<void> {
   applyPg();
   await loadSiteConfig();
   DESIGN_ROWS = designRows();
-  try {
-    loadCss(`${NOTES}/devnotes/design-widget.css`);
-    await loadScript(`${NOTES}/devnotes/design-widget.js`);
-    w.DesignWidget!.apply(DESIGN_ROWS, { storage: "wcb-dw-" });
-  } catch {
-    console.warn("Design widget unavailable: is the local notes server running on 7790?");
+  if (NOTES) {
+    try {
+      loadCss(`${NOTES}/devnotes/design-widget.css`);
+      await loadScript(`${NOTES}/devnotes/design-widget.js`);
+      w.DesignWidget!.apply(DESIGN_ROWS, { storage: "wcb-dw-" });
+    } catch {
+      console.warn(`Design menu unavailable: no notes server at ${NOTES}`);
+    }
   }
   setBackdrop();
 

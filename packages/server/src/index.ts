@@ -64,9 +64,9 @@ function cfInfo(c: Context<App>): { country?: string; city?: string; ip: string 
   return { country: cf?.country, city: cf?.city, ip: c.req.header("CF-Connecting-IP") ?? null, location };
 }
 
-/** The owner counts as online when the inbox toggle is on and an inbox tab is (or was just) open. */
-async function ownerOnline(env: Env, settings: Settings): Promise<boolean> {
-  return settings.ownerOnline && (await hub(env).ownerPresent());
+/** Whether visitors see the owner as online (the inbox's presence setting and, in "auto", recent activity). */
+function ownerOnline(env: Env): Promise<boolean> {
+  return hub(env).ownerPresent();
 }
 
 // ---------- visitor API ----------
@@ -121,6 +121,8 @@ app.post("/api/session", async (c) => {
       ownerName: rest.ownerName?.slice(0, 60),
       cpuBurnMs: typeof rest.cpuBurnMs === "number" ? Math.min(5000, Math.max(0, rest.cpuBurnMs)) : undefined,
       cutoff: rest.cutoff === true || undefined,
+      model: typeof rest.model === "string" && /^[\w.~/:-]{3,120}$/.test(rest.model) ? rest.model : undefined,
+      effort: typeof rest.effort === "string" && EFFORTS.includes(rest.effort) ? rest.effort : undefined,
     };
   }
   const token = await makeToken(env.TOKEN_SECRET, { chatId, visitorId: vid, site: site.key, exp: Date.now() + 6 * 3600_000, dev });
@@ -132,7 +134,7 @@ app.post("/api/session", async (c) => {
     wsUrl: "/api/chat/ws",
     site: toPublic(site),
     aiEnabled: settings.aiEnabled,
-    ownerOnline: await ownerOnline(env, settings),
+    ownerOnline: await ownerOnline(env),
   };
   return c.json(res);
 });
@@ -152,7 +154,7 @@ app.post("/api/my-chats", async (c) => {
   const vid = String(body.visitorId ?? "");
   const known = /^v_[\w]+$/.test(vid) && !!body.visitorKey && (await verifySig(c.env.TOKEN_SECRET, `visitor:${vid}`, body.visitorKey));
   if (!known) return c.json({ chats: [] });
-  const chats = (await db.visitorChats(c.env.DB, vid)).filter((x) => x.site === site.key).map((x) => ({ id: x.id, preview: x.preview, updatedAt: x.updatedAt }));
+  const chats = (await db.visitorChats(c.env.DB, vid)).filter((x) => x.site === site.key).map((x) => ({ id: x.id, preview: x.preview, updatedAt: x.updatedAt, ownerAt: x.ownerAt }));
   return c.json({ chats });
 });
 
@@ -189,7 +191,7 @@ app.get("/api/site/:key", async (c) => {
   if (!site) return c.json({ error: "unknown_site" }, 404);
   const settings = await db.getSettings(c.env.DB);
   return c.json(
-    { site: toPublic(site), aiEnabled: settings.aiEnabled, ownerOnline: await ownerOnline(c.env, settings) },
+    { site: toPublic(site), aiEnabled: settings.aiEnabled, ownerOnline: await ownerOnline(c.env) },
     200,
     { "Cache-Control": "public, max-age=600", "Access-Control-Allow-Origin": "*" },
   );
@@ -237,7 +239,7 @@ app.get("/api/summary", async (c) => {
 
 async function summary(env: Env) {
   const day = Date.now() - 86_400_000;
-  const [settings, spend, stats, enquiries, chats, failedAnswers, failedAttempts, cutOffAnswers, failedAlerts, failedMails] = await Promise.all([
+  const [settings, spend, stats, enquiries, chats, failedAnswers, failedAttempts, cutOffAnswers, failedAlerts, failedMails, answers24h] = await Promise.all([
     db.getSettings(env.DB),
     db.spendToday(env.DB),
     db.stats(env.DB, 7),
@@ -248,11 +250,14 @@ async function summary(env: Env) {
     db.countIncidents(env.DB, "turn_interrupted", day),
     db.countIncidents(env.DB, "alert_failed", day),
     db.countIncidents(env.DB, "mail_failed", day),
+    db.answerStats(env.DB, day),
   ]);
   return {
     aiEnabled: settings.aiEnabled,
-    ownerOnline: settings.ownerOnline,
+    presence: settings.presence,
+    ownerOnline: await ownerOnline(env),
     problemsLast24h: { failedAnswers, failedAttempts, cutOffAnswers, failedAlerts, failedMails },
+    answersLast24h: answers24h,
     spendTodayUsd: spend,
     dailyBudgetUsd: settings.dailyBudgetUsd,
     newEnquiries: enquiries.filter((e) => e.status === "new").length,
@@ -271,10 +276,10 @@ app.use("/admin/api/*", async (c, next) => {
 
 app.get("/admin/api/overview", async (c) => {
   const env = c.env;
-  const [settings, spend, sites, health] = await Promise.all([db.getSettings(env.DB, true), db.spendToday(env.DB), db.listSites(env.DB), db.modelHealth(env.DB)]);
+  const [settings, spend, sites, health, online] = await Promise.all([db.getSettings(env.DB, true), db.spendToday(env.DB), db.listSites(env.DB), db.modelHealth(env.DB), ownerOnline(env)]);
   const siteList = sites.map((s) => ({ key: s.key, name: s.name }));
   if (isDev(env) && !siteList.some((s) => s.key === "demo")) siteList.push({ key: "demo", name: "Demo (dev)" });
-  return c.json({ settings, spendTodayUsd: spend, sites: siteList, modelHealth: health });
+  return c.json({ settings, spendTodayUsd: spend, sites: siteList, modelHealth: health, ownerOnline: online });
 });
 
 app.get("/admin/api/sites", async (c) => c.json(await db.listSites(c.env.DB)));
@@ -340,17 +345,23 @@ app.get("/admin/api/stats", async (c) => {
 
 app.get("/admin/api/summary", async (c) => c.json(await summary(c.env)));
 
+const EFFORTS = ["max", "xhigh", "high", "medium", "low", "none", ""];
+
 function sanitizeSettings(p: Partial<Settings>): Partial<Settings> {
   const out: Partial<Settings> = {};
   const num = (v: unknown, min: number, max: number) => (typeof v === "number" && Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : undefined);
-  for (const k of ["aiEnabled", "ownerOnline", "streaming", "alertOnNewChat"] as const) if (typeof p[k] === "boolean") out[k] = p[k];
+  for (const k of ["aiEnabled", "streaming", "alertOnNewChat"] as const) if (typeof p[k] === "boolean") out[k] = p[k];
+  if (p.presence === "auto" || p.presence === "available" || p.presence === "away") out.presence = p.presence;
   const ranges: [keyof Settings, number, number][] = [
     ["chatCapUsd", 0, 100],
     ["dailyBudgetUsd", 0, 1000],
     ["perVisitorDailyMessages", 1, 1000],
     ["maxMessageChars", 100, 10000],
     ["stallTimeoutSec", 5, 300],
+    ["modelTimeoutSec", 5, 600],
     ["turnTimeoutSec", 10, 900],
+    ["stillWorkingSec", 1, 120],
+    ["awayAfterMin", 1, 240],
     ["deltaBatchMs", 0, 1000],
     ["cooldownAfterFailures", 1, 100],
     ["cooldownMinutes", 1, 1440],
@@ -364,7 +375,14 @@ function sanitizeSettings(p: Partial<Settings>): Partial<Settings> {
   if (Array.isArray(p.ladder)) {
     out.ladder = p.ladder
       .filter((t) => t && typeof t.provider === "string" && typeof t.model === "string" && t.provider && t.model)
-      .map((t) => ({ provider: t.provider, model: t.model, label: String(t.label || t.model), free: !!t.free, enabled: !!t.enabled }));
+      .map((t) => ({
+        provider: t.provider,
+        model: t.model,
+        label: String(t.label || t.model),
+        free: !!t.free,
+        enabled: !!t.enabled,
+        effort: EFFORTS.includes(String(t.effort ?? "high")) ? String(t.effort ?? "high") : "high",
+      }));
   }
   return out;
 }

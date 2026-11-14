@@ -1,4 +1,4 @@
-import { ArrowLeft, Bot, Globe, Hand, Mail, MonitorSmartphone, Send, UserRound } from "lucide-react";
+import { ArrowLeft, Bot, Globe, Hand, Info, Mail, MonitorSmartphone, Send, UserRound, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { newId, renderMarkdown, type ChatMessage, type ChatStatus, type ChatSummary } from "@website-chatbot/shared";
 import { ago, api, chatSocket, usd, type ChatDetail } from "./api";
@@ -42,14 +42,14 @@ export function Chats({ selected, sites, event }: { selected?: string; sites: { 
     <div className="flex h-full min-h-0">
       <section className={`flex w-full min-w-0 flex-col border-r border-border md:w-80 md:shrink-0 ${selected ? "hidden md:flex" : "flex"}`}>
         <div className="space-y-2 border-b border-border p-3">
-          <div className="flex flex-wrap gap-1" role="tablist" aria-label="Filter chats">
+          <div className="-mx-1 flex gap-1 overflow-x-auto px-1" role="tablist" aria-label="Filter chats">
             {FILTERS.map((f) => (
               <button
                 key={f.id}
                 role="tab"
                 aria-selected={filter === f.id}
                 onClick={() => setFilter(f.id)}
-                className={`rounded-full px-2.5 py-1 text-xs ${filter === f.id ? "bg-fg text-bg" : "bg-muted text-muted-fg hover:text-fg"}`}
+                className={`shrink-0 rounded-full px-2.5 py-1 text-xs ${filter === f.id ? "bg-fg text-bg" : "bg-muted text-muted-fg hover:text-fg"}`}
               >
                 {f.label}
               </button>
@@ -115,6 +115,7 @@ function ChatView({ id, siteName }: { id: string; siteName: (k: string) => strin
   const [presence, setPresence] = useState<{ visitorOnline: boolean; page?: string }>({ visitorOnline: false });
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [info, setInfo] = useState(false);
   const sock = useRef<ReturnType<typeof chatSocket> | null>(null);
   const bottom = useRef<HTMLDivElement>(null);
 
@@ -154,10 +155,51 @@ function ChatView({ id, siteName }: { id: string; siteName: (k: string) => strin
   if (error) return <div className="p-4"><ErrorLine error={error} /></div>;
   if (!chat) return <Empty>Loading chat…</Empty>;
 
+  const details = (
+    <>
+      <Detail icon={UserRound} label="Visitor">
+        {chat.name && <div>{chat.name}</div>}
+        {chat.email ? (
+          <a className="text-accent underline" href={`mailto:${chat.email}`}>
+            {chat.email}
+          </a>
+        ) : (
+          <span className="text-muted-fg">No email given</span>
+        )}
+      </Detail>
+      <Detail icon={Globe} label="Where">
+        <div>{[chat.city, chat.country].filter(Boolean).join(", ") || "Unknown location"}</div>
+        <div className="text-muted-fg">Page: {presence.page ?? chat.page ?? "unknown"}</div>
+        <div className="text-muted-fg">Came from: {chat.referrer || "direct"}</div>
+      </Detail>
+      <Detail icon={MonitorSmartphone} label="Device">
+        <div className="text-muted-fg">{chat.device ?? "Unknown"}</div>
+      </Detail>
+      <Detail icon={Bot} label="AI">
+        <div className="tabular">
+          {usd(Math.max(totalCost, chat.costUsd))} · {chat.model ?? "no answers yet"}
+        </div>
+      </Detail>
+      {detail.visitorChats.length > 0 && (
+        <Detail icon={Mail} label="Earlier chats">
+          <ul className="space-y-1">
+            {detail.visitorChats.map((v) => (
+              <li key={v.id}>
+                <a href={`#/chats/${v.id}`} className="block truncate text-accent underline">
+                  {ago(v.updatedAt)}: {v.preview || "empty"}
+                </a>
+              </li>
+            ))}
+          </ul>
+        </Detail>
+      )}
+    </>
+  );
+
   return (
     <div className="flex min-w-0 flex-1">
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex items-center gap-2 border-b border-border px-3 py-2">
+        <header className="flex items-center gap-1.5 border-b border-border px-2 py-1.5 md:gap-2 md:px-3 md:py-2">
           <a href="#/chats" className="rounded-md p-1.5 text-muted-fg hover:bg-muted md:hidden" aria-label="Back to chats">
             <ArrowLeft size={18} />
           </a>
@@ -168,17 +210,36 @@ function ChatView({ id, siteName }: { id: string; siteName: (k: string) => strin
             </p>
           </div>
           {status?.mode === "owner" ? (
-            <Button onClick={() => sock.current?.send({ t: "owner_hand_back" })} title="The AI answers the visitor's next message">
-              <Bot size={15} /> Hand back to AI
+            <Button onClick={() => sock.current?.send({ t: "owner_hand_back" })} title="The AI answers the visitor's next message" className="px-2 md:px-3">
+              <Bot size={15} /> <span className="hidden sm:inline">Hand back to AI</span>
+              <span className="sm:hidden">Hand back</span>
             </Button>
           ) : (
-            <Button variant="primary" onClick={() => sock.current?.send({ t: "owner_join" })} disabled={!connected} title="The AI stops answering this chat">
-              <Hand size={15} /> Join chat
+            <Button variant="primary" onClick={() => sock.current?.send({ t: "owner_join" })} disabled={!connected} title="The AI stops answering this chat" className="px-2 md:px-3">
+              <Hand size={15} /> <span className="hidden sm:inline">Join chat</span>
+              <span className="sm:hidden">Join</span>
             </Button>
           )}
+          <button className="rounded-md p-1.5 text-muted-fg hover:bg-muted xl:hidden" aria-label="Visitor details" aria-expanded={info} onClick={() => setInfo(true)}>
+            <Info size={18} />
+          </button>
         </header>
 
-        <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-4">
+        {info && (
+          <div className="fixed inset-0 z-40 flex justify-end bg-black/40 xl:hidden" onClick={() => setInfo(false)}>
+            <div className="h-full w-80 max-w-[85%] space-y-4 overflow-y-auto bg-panel p-4 text-sm shadow-xl" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Visitor details">
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-semibold">Visitor details</h2>
+                <button className="rounded-md p-1.5 hover:bg-muted" aria-label="Close details" onClick={() => setInfo(false)}>
+                  <X size={18} />
+                </button>
+              </div>
+              {details}
+            </div>
+          </div>
+        )}
+
+        <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3 md:p-4">
           {messages.length === 0 && <p className="text-center text-sm text-muted-fg">No messages yet.</p>}
           {messages.map((m) => (
             <Bubble key={m.id} m={m} />
@@ -192,42 +253,7 @@ function ChatView({ id, siteName }: { id: string; siteName: (k: string) => strin
       </div>
 
       <aside className="hidden w-72 shrink-0 space-y-4 overflow-y-auto border-l border-border p-4 text-sm xl:block [html[data-d-layout=two]_&]:hidden">
-        <Detail icon={UserRound} label="Visitor">
-          {chat.name && <div>{chat.name}</div>}
-          {chat.email ? (
-            <a className="text-accent underline" href={`mailto:${chat.email}`}>
-              {chat.email}
-            </a>
-          ) : (
-            <span className="text-muted-fg">No email given</span>
-          )}
-        </Detail>
-        <Detail icon={Globe} label="Where">
-          <div>{[chat.city, chat.country].filter(Boolean).join(", ") || "Unknown location"}</div>
-          <div className="text-muted-fg">Page: {presence.page ?? chat.page ?? "unknown"}</div>
-          <div className="text-muted-fg">Came from: {chat.referrer || "direct"}</div>
-        </Detail>
-        <Detail icon={MonitorSmartphone} label="Device">
-          <div className="text-muted-fg">{chat.device ?? "Unknown"}</div>
-        </Detail>
-        <Detail icon={Bot} label="AI">
-          <div className="tabular">
-            {usd(Math.max(totalCost, chat.costUsd))} · {chat.model ?? "no answers yet"}
-          </div>
-        </Detail>
-        {detail.visitorChats.length > 0 && (
-          <Detail icon={Mail} label="Earlier chats">
-            <ul className="space-y-1">
-              {detail.visitorChats.map((v) => (
-                <li key={v.id}>
-                  <a href={`#/chats/${v.id}`} className="block truncate text-accent underline">
-                    {ago(v.updatedAt)}: {v.preview || "empty"}
-                  </a>
-                </li>
-              ))}
-            </ul>
-          </Detail>
-        )}
+        {details}
       </aside>
     </div>
   );
@@ -280,36 +306,42 @@ function Reply({ status, connected, hasEmail, onSend }: { status: ChatStatus | n
   };
   return (
     <form
-      className="border-t border-border p-3"
+      className="border-t border-border p-2 md:p-3"
       onSubmit={(e) => {
         e.preventDefault();
         send();
       }}
     >
-      <textarea
-        rows={2}
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-            e.preventDefault();
-            send();
-          }
-        }}
-        placeholder={joined ? "Reply to the visitor…" : "Reply to take over from the AI…"}
-        aria-label="Your reply"
-        className="w-full resize-y rounded-md border border-border bg-panel px-3 py-2 text-sm"
-      />
-      <div className="mt-2 flex items-center justify-between gap-2">
+      <div className="flex items-end gap-2">
+        <textarea
+          rows={1}
+          value={text}
+          onChange={(e) => {
+            setText(e.target.value);
+            e.target.style.height = "auto";
+            e.target.style.height = `${Math.min(e.target.scrollHeight, 160)}px`;
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+              e.preventDefault();
+              send();
+            }
+          }}
+          placeholder={joined ? "Reply to the visitor…" : "Reply to take over from the AI…"}
+          aria-label="Your reply"
+          className="min-h-10 flex-1 resize-none rounded-md border border-border bg-panel px-3 py-2 text-sm"
+        />
+        <Button type="submit" variant="primary" disabled={!text.trim() || !connected} aria-label={joined ? "Send" : "Send and take over"} className="h-10">
+          <Send size={15} /> <span className="hidden md:inline">{joined ? "Send" : "Send and take over"}</span>
+        </Button>
+      </div>
+      <div className="mt-1.5 flex items-center justify-between gap-2">
         <label className={`flex items-center gap-2 text-xs ${hasEmail ? "" : "text-muted-fg"}`} title={hasEmail ? "" : "The visitor hasn't given an email address"}>
           <input type="checkbox" checked={email && hasEmail} disabled={!hasEmail} onChange={(e) => setEmail(e.target.checked)} />
           Also email this reply
         </label>
-        <Button type="submit" variant="primary" disabled={!text.trim() || !connected}>
-          <Send size={14} /> {joined ? "Send" : "Send and take over"}
-        </Button>
+        <span className="text-xs text-muted-fg">{!connected ? "Connecting…" : joined ? "" : <span className="hidden md:inline">Sending takes over from the AI</span>}</span>
       </div>
-      {!connected && <p className="mt-1 text-xs text-muted-fg">Connecting…</p>}
     </form>
   );
 }

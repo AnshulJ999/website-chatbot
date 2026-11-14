@@ -48,6 +48,7 @@ export function initDev(_host: HTMLElement, opts: WidgetOptions, client: ChatCli
       scenario: d.pgScenario ?? "none",
       ...(d.pgBrain === "real" && Number(d.pgCpu) > 0 ? { cpuBurnMs: Number(d.pgCpu) } : {}),
       ...(d.pgBrain === "real" && d.pgCutoff === "1" ? { cutoff: true } : {}),
+      ...(d.pgBrain === "real" && d.pgModel ? { model: d.pgModel, effort: d.pgEffort ?? "high" } : {}),
       ...(ownerName ? { ownerName } : {}),
     };
     const key = JSON.stringify(dev);

@@ -1,6 +1,4 @@
-// Dev only: the shared Notes widget and Design menu from the local notes server.
-const NOTES = "http://127.0.0.1:7790";
-const API = `${NOTES}/api/devnotes/website-chatbot`;
+// Optional review tools: the Notes widget and Design menu, served by a notes server (VITE_NOTES_SERVER).
 
 export const DESIGN_ROWS = [
   { key: "layout", label: "Inbox layout", options: [{ id: "three", label: "Three panes" }, { id: "two", label: "Two panes" }], fallback: "three" },
@@ -21,7 +19,8 @@ const load = (src: string) =>
     document.head.appendChild(s);
   });
 
-export async function loadDevTools(): Promise<void> {
+export async function loadDevTools(NOTES: string): Promise<void> {
+  const API = `${NOTES}/api/devnotes/website-chatbot`;
   const w = window as W;
   const isDark = () => matchMedia("(prefers-color-scheme: dark)").matches;
   const css = document.createElement("link");
@@ -48,7 +47,7 @@ export async function loadDevTools(): Promise<void> {
         app: "Website Chatbot",
         endpoint: API,
         position: "bottom-left",
-        instance: `Inbox :${location.port}`,
+        instance: `Inbox ${location.port ? `:${location.port}` : location.host}`,
         showInstance: true,
         screen: () => `Inbox ▸ ${location.hash.split("/")[1] || "chats"}`,
         isDark,

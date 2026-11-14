@@ -2,7 +2,9 @@ node_modules/
 dist/
 .wrangler/
 .dev.vars
+packages/server/wrangler.jsonc
 .env
+.env.local
 *.log
 _scratch_*
 packages/server/public/widget/

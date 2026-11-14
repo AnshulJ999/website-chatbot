@@ -7,6 +7,8 @@ export type Conn = "idle" | "connecting" | "open" | "reconnecting" | "unreachabl
 export interface View {
   open: boolean;
   bubble: boolean;
+  /** The bubble's text when it isn't the site's first-visit greeting. */
+  bubbleText?: string;
   messages: ChatMessage[];
   preview: string;
   status: ChatStatus;

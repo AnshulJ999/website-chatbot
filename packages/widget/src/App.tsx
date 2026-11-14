@@ -35,10 +35,10 @@ export function App({ client }: { client: ChatClient }) {
   return (
     <div class={`root corner-${u.corner} actions-${u.actions} ${v.open ? "is-open" : ""}`}>
       {v.open && <Panel client={client} site={s} v={v} closing={closing} onClose={close} />}
-      {!v.open && v.bubble && s.proactive.text && (
+      {!v.open && v.bubble && (v.bubbleText || s.proactive.text) && (
         <div class="bubble" role="status">
           <button class="bubble-text" onClick={open}>
-            {s.proactive.text}
+            {v.bubbleText || s.proactive.text}
           </button>
           <button class="icon-btn small" aria-label="Dismiss" onClick={() => setView({ bubble: false })}>
             <Icon name="x" />
@@ -66,6 +66,9 @@ function Panel({ client, site: s, v, closing, onClose }: { client: ChatClient; s
   const panelRef = useRef<HTMLDivElement>(null);
   const size = useResize(panelRef);
   const [expanded, setExpanded] = useExpanded();
+  const [past, setPast] = useState<PastChat[] | null>(null);
+  const pastOpen = useRef(false);
+  pastOpen.current = past !== null;
   const sheet = expanded || u.panel === "sheet";
   // The side sheet keeps the visitor's width; its height is the whole window.
   const sizeStyle = { ...(size.w ? { width: `${size.w}px` } : {}), ...(!sheet && size.h ? { height: `${size.h}px` } : {}) };
@@ -74,11 +77,17 @@ function Panel({ client, site: s, v, closing, onClose }: { client: ChatClient; s
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       if ((forced.value ?? live.value).menu) setView({ menu: false });
+      else if (pastOpen.current) setPast(null);
       else onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
+
+  // The visitor has now seen everything in this chat, including any reply from the owner.
+  useEffect(() => {
+    if (!forced.value) client.markSeen();
+  }, [client, v.messages.length]);
 
   const formReason: GetInTouchReason | null =
     v.conn === "unreachable" ? null : st.mode === "form" ? (st.reason ?? "ai_unavailable") : st.reason === "owner_away" && !v.formDismissed && !st.contactSent ? "owner_away" : null;
@@ -119,18 +128,24 @@ function Panel({ client, site: s, v, closing, onClose }: { client: ChatClient; s
         </button>
       </header>
 
-      {v.menu && <Menu client={client} site={s} v={v} />}
+      {v.menu && <Menu client={client} site={s} v={v} onPast={setPast} />}
 
-      {talkVisible && u.talkPlacement === "bar" && <TalkBar client={client} site={s} v={v} />}
+      {past ? (
+        <PastChats client={client} chats={past} onBack={() => setPast(null)} />
+      ) : (
+        <>
+          {talkVisible && u.talkPlacement === "bar" && <TalkBar client={client} site={s} v={v} />}
 
-      <Messages client={client} site={s} v={v} formReason={formReason} />
+          <Messages client={client} site={s} v={v} formReason={formReason} />
 
-      {notice.value && <div class={`toast ${notice.value.tone}`}>{notice.value.text}</div>}
+          {notice.value && <div class={`toast ${notice.value.tone}`}>{notice.value.text}</div>}
 
-      {canType && (
-        <Composer client={client} v={v} talk={talkVisible && u.talkPlacement === "composer" ? <TalkLink client={client} site={s} v={v} /> : null} />
+          {canType && (
+            <Composer client={client} v={v} talk={talkVisible && u.talkPlacement === "composer" ? <TalkLink client={client} site={s} v={v} /> : null} />
+          )}
+        </>
       )}
-      {u.notice === "under" && (
+      {!past && u.notice === "under" && (
         <p class="notice-under">
           {s.noticeText}
           {s.privacyUrl && (
@@ -172,10 +187,40 @@ function TalkLink({ client, site: s, v }: { client: ChatClient; site: PublicSite
   );
 }
 
-function Menu({ client, site: s, v }: { client: ChatClient; site: PublicSiteConfig; v: View }) {
+/** The visitor's earlier chats, as a screen of its own inside the panel. */
+function PastChats({ client, chats, onBack }: { client: ChatClient; chats: PastChat[]; onBack: () => void }) {
+  return (
+    <div class="pastscreen">
+      <div class="pastscreen-head">
+        <button class="icon-btn" aria-label="Back to the chat" onClick={onBack} autoFocus>
+          <Icon name="back" />
+        </button>
+        <h2>Past chats</h2>
+      </div>
+      {chats.length ? (
+        <ul class="past-list">
+          {chats.map((p) => (
+            <li key={p.id}>
+              <button class="past-item" onClick={() => (onBack(), void client.switchTo(p.id))}>
+                <span class="past-text">{p.preview.replace(/^\w+: /, "").replace(/[*_#`>[\]]/g, "").replace(/\s+/g, " ").trim() || "Chat"}</span>
+                <span class="past-when">{new Date(p.updatedAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p class="past-empty">No earlier chats in this browser.</p>
+      )}
+      <button class="btn small past-new" onClick={() => (onBack(), void client.newChat())}>
+        <Icon name="plus" /> Start new chat
+      </button>
+    </div>
+  );
+}
+
+function Menu({ client, site: s, v, onPast }: { client: ChatClient; site: PublicSiteConfig; v: View; onPast: (chats: PastChat[]) => void }) {
   const [emailing, setEmailing] = useState(false);
   const [email, setEmail] = useState(v.status.visitorEmail ?? "");
-  const [past, setPast] = useState<PastChat[] | null>(null);
   const u = ui.value;
   const close = () => setView({ menu: false });
   return (
@@ -183,22 +228,9 @@ function Menu({ client, site: s, v }: { client: ChatClient; site: PublicSiteConf
       <button role="menuitem" onClick={() => (close(), void client.newChat())}>
         <Icon name="plus" /> Start new chat
       </button>
-      <button role="menuitem" aria-expanded={!!past} onClick={async () => setPast(past ? null : await client.pastChats())}>
+      <button role="menuitem" onClick={async () => (close(), onPast(await client.pastChats()))}>
         <Icon name="history" /> Past chats
       </button>
-      {past &&
-        (past.length ? (
-          <div class="past">
-            {past.map((p) => (
-              <button key={p.id} role="menuitem" class="past-item" onClick={() => (close(), void client.switchTo(p.id))}>
-                <span class="past-text">{p.preview.replace(/^\w+: /, "").replace(/[*_#`>[\]]/g, "").replace(/\s+/g, " ").trim() || "Chat"}</span>
-                <span class="past-when">{new Date(p.updatedAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span>
-              </button>
-            ))}
-          </div>
-        ) : (
-          <p class="menu-note">No earlier chats in this browser.</p>
-        ))}
       {!emailing ? (
         <button role="menuitem" disabled={!v.messages.length} onClick={() => setEmailing(true)}>
           <Icon name="mail" /> Email me this chat…

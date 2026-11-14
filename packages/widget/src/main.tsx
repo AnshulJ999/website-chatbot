@@ -60,16 +60,24 @@ async function loadSite(server: string, key: string): Promise<PublicSiteConfig |
   return site.value;
 }
 
-function scheduleBubble(s: PublicSiteConfig): void {
-  if (!s.proactive.enabled || !s.proactive.text) return;
+/**
+ * The bubble above the closed chat, once per browser session: a reply from the owner the visitor hasn't
+ * seen (always), else "welcome back" for a visitor with a saved chat, else the site's greeting.
+ */
+function scheduleBubble(s: PublicSiteConfig, client: ChatClient): void {
+  let shown = false;
   try {
-    if (sessionStorage.getItem("wcb:bubble")) return;
+    shown = !!sessionStorage.getItem("wcb:bubble");
   } catch {
     // show it anyway
   }
-  setTimeout(() => {
-    if (live.value.open || live.value.messages.length) return;
-    patch({ bubble: true });
+  setTimeout(async () => {
+    if (live.value.open) return;
+    let text = "";
+    if (await client.ownerReplied()) text = `${s.ownerName.charAt(0).toUpperCase()}${s.ownerName.slice(1)} replied to your message`;
+    else if (!shown && s.proactive.enabled) text = live.value.messages.length ? "Welcome back! Pick up where you left off?" : s.proactive.text;
+    if (!text || live.value.open) return;
+    patch({ bubble: true, bubbleText: text });
     try {
       sessionStorage.setItem("wcb:bubble", "1");
     } catch {
@@ -102,7 +110,7 @@ export async function boot(opts: WidgetOptions): Promise<void> {
   ui.value = { ...DEFAULT_UI, ...s.ui, ...opts.ui };
   client.hydrate();
   render(<App client={client} />, mount);
-  scheduleBubble(s);
+  scheduleBubble(s, client);
 
   window.WebsiteChatbot = {
     open: () => {

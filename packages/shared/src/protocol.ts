@@ -87,6 +87,9 @@ export interface DevOptions {
   cpuBurnMs?: number;
   /** Cut-off test: the chat's server object restarts partway through the next streamed answer. */
   cutoff?: boolean;
+  /** Model test: answer with only this model (an Omnara model name granted to the project), at this effort. */
+  model?: string;
+  effort?: string;
   /** Owner pass from /admin/api/dev-pass; lets the hosted Playground use these options. */
   pass?: string;
 }
@@ -109,7 +112,11 @@ export type HubMsg =
   | { t: "chat"; chat: ChatSummary }
   | { t: "enquiry"; id: string }
   | { t: "settings" }
+  | { t: "presence"; online: boolean }
   | { t: "pong" };
+
+/** Inbox -> hub: keepalive, and the owner's activity on that device ("idle" and "locked" mean away now). */
+export type HubIn = { t: "ping" } | { t: "activity"; state: "active" | "idle" | "locked" };
 
 export interface ChatSummary {
   id: string;
@@ -133,6 +140,8 @@ export interface ChatSummary {
   unread: number;
   createdAt: number;
   updatedAt: number;
+  /** When the owner last wrote in this chat. */
+  ownerAt?: number;
 }
 
 export interface Enquiry {

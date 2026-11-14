@@ -21,6 +21,7 @@ interface Saved {
 
 const storeKey = (site: string) => `wcb:${site}`;
 const cacheKey = (site: string) => `wcb:${site}:cache`;
+const seenKey = (site: string) => `wcb:${site}:seen`;
 
 /** A copy of the current chat, shown at once on the next page load while the server's copy loads. */
 interface Cache {
@@ -32,6 +33,8 @@ export interface PastChat {
   id: string;
   preview: string;
   updatedAt: number;
+  /** When the owner last wrote in it. */
+  ownerAt?: number;
 }
 
 function readCache(siteKey: string): Cache | null {
@@ -283,8 +286,8 @@ export class ChatClient {
     return this.start(true);
   }
 
-  /** The visitor's earlier chats on this site (this browser's visitor only). */
-  async pastChats(): Promise<PastChat[]> {
+  /** All of this browser's visitor's chats on this site. */
+  private async myChats(): Promise<PastChat[]> {
     const saved = load(this.o.siteKey);
     if (!saved.visitorId || !saved.visitorKey) return [];
     try {
@@ -294,10 +297,38 @@ export class ChatClient {
         body: JSON.stringify({ site: this.o.siteKey, visitorId: saved.visitorId, visitorKey: saved.visitorKey }),
       });
       if (!res.ok) return [];
-      const { chats } = (await res.json()) as { chats: PastChat[] };
-      return chats.filter((c) => c.id !== (this.session?.chatId ?? saved.chatId));
+      return ((await res.json()) as { chats: PastChat[] }).chats;
     } catch {
       return [];
+    }
+  }
+
+  /** The visitor's earlier chats, without the current one. */
+  async pastChats(): Promise<PastChat[]> {
+    const current = this.session?.chatId ?? load(this.o.siteKey).chatId;
+    return (await this.myChats()).filter((c) => c.id !== current);
+  }
+
+  /** True when the owner has written in the saved chat since the visitor last had it open. */
+  async ownerReplied(): Promise<boolean> {
+    const chatId = load(this.o.siteKey).chatId;
+    if (!chatId) return false;
+    let seen = 0;
+    try {
+      seen = Number(localStorage.getItem(seenKey(this.o.siteKey))) || 0;
+    } catch {
+      // treat as never seen
+    }
+    const chat = (await this.myChats()).find((c) => c.id === chatId);
+    return !!chat?.ownerAt && chat.ownerAt > seen;
+  }
+
+  /** Records that the visitor has seen the chat as it is now. */
+  markSeen(): void {
+    try {
+      localStorage.setItem(seenKey(this.o.siteKey), String(Date.now()));
+    } catch {
+      // the reply notice may show once more
     }
   }
 

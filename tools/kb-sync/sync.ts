@@ -9,7 +9,7 @@
 
 import { createHash } from "node:crypto";
 import { readFileSync, readdirSync, statSync } from "node:fs";
-import { basename, dirname, extname, join, relative, resolve } from "node:path";
+import { basename, dirname, extname, join, posix, relative, resolve } from "node:path";
 import { gfm } from "@joplin/turndown-plugin-gfm";
 import { parseHTML } from "linkedom";
 import TurndownService from "turndown";
@@ -113,6 +113,25 @@ function clean(text: string): string {
 
 const withUrl = (url: string, body: string) => `URL: ${url}\n\n${body}\n`;
 
+/** llms.txt-style files link the site's pages as ".md" copies; visitors need the normal pages. */
+function htmlPageLinks(body: string, origin: string): string {
+  const site = origin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return body.replace(new RegExp(`(${site}(?:/[^)\\s#]*)?)\\.md(?=[)#\\s]|$)`, "gm"), "$1");
+}
+
+/**
+ * Docs in a repo link to each other by file name ("indexing.md#first-index"); the agent would copy those, so they
+ * become the real page addresses. Images are dropped: the agent can't show them.
+ */
+function linkPages(body: string, s: Source, slug: string, url: string): string {
+  const folder = slug.includes("/") ? slug.slice(0, slug.lastIndexOf("/") + 1) : "";
+  const pageFor = (target: string) => (s.index && target === s.index ? s.pageUrl!.replace(/\/?\{slug\}$/, "") : s.pageUrl!.replace("{slug}", target));
+  return body
+    .replace(/!\[[^\]]*\]\([^)]*\)[ \t]*\n?/g, "")
+    .replace(/\]\((?!https?:|mailto:)([^)#\s]+?)\.mdx?(#[^)\s]*)?\)/g, (_m, file: string, hash = "") => `](${pageFor(posix.normalize(folder + file))}${hash})`)
+    .replace(/\]\((#[^)\s]+)\)/g, (_m, hash: string) => `](${url}${hash})`);
+}
+
 // ---------- live pages (sitemap -> Markdown) ----------
 
 const turndown = new TurndownService({ headingStyle: "atx", codeBlockStyle: "fenced", bulletListMarker: "-", emDelimiter: "*" });
@@ -206,14 +225,14 @@ async function collect(): Promise<KbFile[]> {
         const rel = relative(dir, full).replace(/\\/g, "/");
         const slug = rel.replace(/\.(md|mdx|txt)$/i, "");
         const url = s.index && slug === s.index ? s.pageUrl!.replace(/\/?\{slug\}$/, "") : s.pageUrl!.replace("{slug}", slug);
-        files.push({ path: `${s.storePath}/${slug}.md`, body: withUrl(url, clean(readFileSync(full, "utf8"))) });
+        files.push({ path: `${s.storePath}/${slug}.md`, body: withUrl(url, linkPages(clean(readFileSync(full, "utf8")), s, slug, url)) });
       }
     } else if (s.type === "file") {
       files.push({ path: s.storePath, body: withUrl(s.pageUrl!, clean(readFileSync(resolve(base, s.file!), "utf8"))) });
     } else {
       const res = await fetch(s.url!);
       if (!res.ok) throw new Error(`${s.url}: HTTP ${res.status}`);
-      files.push({ path: s.storePath, body: withUrl(s.pageUrl!, (await res.text()).trim()) });
+      files.push({ path: s.storePath, body: withUrl(s.pageUrl!, htmlPageLinks((await res.text()).trim(), new URL(s.pageUrl!).origin)) });
     }
   }
   if (cfg.curatedDir) {
