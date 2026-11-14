@@ -86,6 +86,7 @@ const CUTOFF_TESTS = [opt("0", "Off"), opt("1", "Cut off mid-answer")];
 const MODELS = [
   opt("", "The model ladder (normal)"),
   opt("deepseek/deepseek-v4.1-flash-latest", "DeepSeek V4.1 Flash"),
+  opt("z-ai/glm-5.3-flash-latest", "GLM 5.3 Flash"),
   opt("openai/gpt-6-luna", "GPT-6 Luna"),
   opt("anthropic/claude-haiku-5.5", "Claude Haiku 5.5"),
 ];

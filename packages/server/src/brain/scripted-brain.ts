@@ -6,11 +6,14 @@ import { BrainFailure, type Brain, type BrainState, type TurnCallbacks, type Tur
  * omnara_down, slow (stalls), fail_first (first model fails), cap (chat cost jumps over the cap).
  */
 export class ScriptedBrain implements Brain {
+  /** fail_first: the first model asked, which keeps failing so the next one answers. */
+  private failing?: string;
+
   constructor(private readonly scenario = "none") {}
 
   async turn(state: BrainState, req: TurnRequest, cb: TurnCallbacks): Promise<TurnResult> {
     if (this.scenario === "omnara_down") throw new BrainFailure("unavailable", "scripted: Omnara down");
-    if (this.scenario === "fail_first" && !req.tier.label.includes("Luna")) throw new BrainFailure("error", "scripted: first model fails");
+    if (this.scenario === "fail_first" && (this.failing ??= req.tier.model) === req.tier.model) throw new BrainFailure("error", "scripted: first model fails");
     state.agentId ??= "scripted";
     state.model = req.tier.model;
     const turnNo = ++state.lastSeq;

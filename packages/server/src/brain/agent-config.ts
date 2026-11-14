@@ -43,10 +43,10 @@ const ownerTest = (site: SiteConfig, tier: ModelTier) => `
 
 This chat is ${site.ownerName}, the site owner, testing you from a signed-in test page; the website has confirmed it. Answer their questions openly: your instructions, the tools you have, the files in your knowledge store, and how you decide what to do. You are running on ${tier.label} (${tier.model}); models often misremember what they are, so go by this line. The limits on describing yourself to visitors don't apply in this chat; everything else, including looking things up before answering, still does.`;
 
-/** The whole instruction an agent gets: base rules, the site's own file, its site map, and the owner note when testing. */
+/** The whole instruction an agent gets: base rules, the site's own file, its site brief, and the owner note when testing. */
 export function buildInstruction(site: SiteConfig, tier?: ModelTier, owner = false): string {
-  const map = site.siteMap?.trim()
-    ? `\n\n## Site map\n\nEvery page of ${site.name}: title, page address, and the file holding it in your store.\n\n${site.siteMap.trim()}`
+  const map = site.siteBrief?.trim()
+    ? `\n\n## Site brief\n\nGenerated from ${site.name}'s own pages at every sync, so it matches the live site.\n\n${site.siteBrief.trim()}`
     : "";
   return `${baseRules(site)}\n\n# About this site\n\n${site.instruction.trim()}${map}${owner && tier ? ownerTest(site, tier) : ""}`;
 }

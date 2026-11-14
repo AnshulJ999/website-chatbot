@@ -2,7 +2,7 @@
 // time limit, the per-chat spending cap, and owner takeover. Uses the scripted brain (dev mode).
 import { SELF, env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import type { ChatMessage, ChatStatus, ServerMsg, SessionResponse, Settings } from "@website-chatbot/shared";
+import { DEFAULT_SETTINGS, type ChatMessage, type ChatStatus, type ServerMsg, type SessionResponse, type Settings } from "@website-chatbot/shared";
 
 const ORIGIN = "http://localhost:5290";
 
@@ -74,8 +74,9 @@ describe("answers", () => {
     const { visitor, chatId } = await openChat("fail_first");
     visitor.send({ t: "send", id: "m1", text: "Hello" });
     await visitor.until(() => aiAnswers(visitor).length === 1);
-    expect(aiAnswers(visitor)[0]!.text).toContain("GPT-6 Luna");
-    expect((await incidents(chatId, "attempt_failed")).map((r) => r.model)).toEqual(["deepseek/deepseek-v4.1-flash-latest", "deepseek/deepseek-v4.1-flash-latest"]);
+    const [first, second] = DEFAULT_SETTINGS.ladder;
+    expect(aiAnswers(visitor)[0]!.text).toContain(second!.label);
+    expect((await incidents(chatId, "attempt_failed")).map((r) => r.model)).toEqual([first!.model, first!.model]);
     expect(await incidents(chatId, "turn_failed")).toEqual([]);
   });
 

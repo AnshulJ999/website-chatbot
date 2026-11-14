@@ -158,6 +158,13 @@ function PromptViewer({ sites }: { sites: { key: string; name: string }[] }) {
   const [data, setData] = useState<{ prompt: string; tokensApprox: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    if (!data) return;
+    await navigator.clipboard.writeText(data.prompt);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
   const load = async () => {
     setLoading(true);
     setError(null);
@@ -189,6 +196,7 @@ function PromptViewer({ sites }: { sites: { key: string; name: string }[] }) {
         <Button disabled={!site || loading} onClick={() => void load()}>
           {loading ? "Loading…" : data ? "Reload prompt" : "Show prompt"}
         </Button>
+        {data && <Button onClick={() => void copy()}>{copied ? "Copied" : "Copy"}</Button>}
       </div>
       {error && <p className="mt-2 text-sm text-danger">{error}</p>}
       {data && <pre className="mt-3 max-h-[60vh] overflow-auto whitespace-pre-wrap rounded-md border border-border bg-muted p-3 text-xs">{data.prompt}</pre>}

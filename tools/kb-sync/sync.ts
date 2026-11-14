@@ -1,24 +1,27 @@
 #!/usr/bin/env node
 // kb-sync: copies a site's content into its Omnara memory store (one file per page, each starting
-// with its real URL) and pushes the site's chatbot config, with a map of its pages, to the chat server.
+// with its real URL) and pushes the site's chatbot config, with a generated site brief, to the chat server.
 //
-//   node sync.ts <site>/chatbot/chatbot.config.json [--live] [--env <file>] [--dry-run [--show <store path>]] [--prune] [--force] [--alert] [--create-store] [--no-push]
+//   node sync.ts <site>/chatbot/chatbot.config.json [--live] [--full] [--env <file>] [--dry-run [--show <store path>|brief]] [--prune] [--force] [--alert] [--create-store] [--no-push]
 //
-// --live: the deployed server. Reads .sync.vars beside this file, removes pages that left the site (guarded),
-// checks the store afterwards and asks the live bot one question. Ends with "SYNC OK" or "SYNC FAILED" (exit 1).
+// --live: the deployed server. Reads .sync.vars beside this file, stops early when nothing changed since the last
+// good run (--full syncs anyway), removes pages that left the site (guarded) and checks the store afterwards.
+// Ends with "SYNC OK" or "SYNC FAILED" (exit 1); the result is kept in .sync-state.json beside this file.
 // Checks run before anything is written; --force overrides them. --alert sends a failure to the system ntfy topic.
 //
 // Credentials come from the environment, --env, or .sync.vars (--live): OMNARA_API_KEY, OMNARA_ORG_ID,
 // OMNARA_PROJECT_ID, CHATBOT_SERVER (or PUBLIC_URL), API_TOKEN; optional CHATBOT_SERVER_IP (reach the server at
 // this address when local DNS points its name elsewhere), NTFY_URL and NTFY_TOKEN (for --alert).
 
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, dirname, extname, join, posix, relative, resolve } from "node:path";
 import { gfm } from "@joplin/turndown-plugin-gfm";
 import { parseHTML } from "linkedom";
 import TurndownService from "turndown";
-import { Agent, WebSocket, fetch as uFetch } from "undici";
+import { Agent, fetch as uFetch } from "undici";
 
 interface Source {
   /**
@@ -26,6 +29,8 @@ interface Source {
    * "sitemap": every HTML page in the site's sitemap, converted to Markdown.
    */
   type: "dir" | "file" | "url" | "sitemap";
+  /** dir/file: read from a shallow checkout of this git repository instead of the config's folder. */
+  git?: { url: string; branch?: string };
   dir?: string;
   file?: string;
   url?: string;
@@ -54,6 +59,17 @@ interface SyncConfig {
   sources: Source[];
   /** Curated knowledge folder; files may start with their own "URL:" line. */
   curatedDir?: string;
+  brief?: BriefConfig;
+}
+
+/** The site brief at the end of every prompt, generated at each sync. */
+interface BriefConfig {
+  /** What the site says about itself: the top of a text page before its first "## " heading (e.g. /llms.txt), or chosen "## " sections of a synced page ("" = the part before the first one). */
+  about?: { url?: string; file?: string; sections?: string[] }[];
+  /** owner/repo: the newest stable release and any newer pre-release, from its GitHub releases feed. */
+  releases?: string;
+  /** Page list groups, first match wins: `match` is a store path prefix ("" matches everything left). */
+  groups?: { label: string; match: string }[];
 }
 
 const args = process.argv.slice(2);
@@ -105,6 +121,55 @@ const cfg = JSON.parse(readFileSync(cfgFile, "utf8")) as SyncConfig;
 interface KbFile {
   path: string;
   body: string;
+  /** One-line summary for the site brief (front matter or meta description). */
+  desc?: string;
+}
+
+/** Shallow, sparse checkouts of git sources, one per repository and branch; removed when the run ends. */
+const checkouts = new Map<string, string>();
+process.on("exit", () => {
+  for (const dir of checkouts.values()) rmSync(dir, { recursive: true, force: true });
+});
+
+function sourceRoot(s: Source): string {
+  if (!s.git) return base;
+  const key = `${s.git.url}#${s.git.branch ?? ""}`;
+  const known = checkouts.get(key);
+  if (known) return known;
+  const dir = mkdtempSync(join(tmpdir(), "kb-sync-"));
+  checkouts.set(key, dir);
+  const git = (a: string[], cwd?: string) =>
+    execFileSync("git", a, { cwd, stdio: ["ignore", "pipe", "pipe"], timeout: 120_000, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } }).toString().trim();
+  const folders = [
+    ...new Set(
+      cfg.sources
+        .filter((o) => o.git?.url === s.git!.url && (o.git.branch ?? "") === (s.git!.branch ?? ""))
+        .map((o) => o.dir ?? posix.dirname(o.file ?? "."))
+        .filter((d) => d && d !== "."),
+    ),
+  ];
+  git(["clone", "--quiet", "--depth", "1", "--filter=blob:none", "--sparse", ...(s.git.branch ? ["--branch", s.git.branch] : []), s.git.url, dir]);
+  if (folders.length) git(["sparse-checkout", "set", ...folders], dir);
+  console.log(`  read ${s.git.url}${s.git.branch ? `@${s.git.branch}` : ""} (${git(["rev-parse", "--short", "HEAD"], dir)})`);
+  return dir;
+}
+
+function frontDesc(text: string): string | undefined {
+  const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text)?.[1];
+  return fm ? /^description:\s*["']?(.+?)["']?\s*$/m.exec(fm)?.[1] : undefined;
+}
+
+const plain = (md: string) => md.replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/[*_`]/g, "").replace(/\s+/g, " ").trim();
+
+/** A doc's summary: its front matter, else its line in the index file ("- [Name](file.md): summary"), else its first paragraph. */
+function docDesc(raw: string, slug: string, indexText: string): string | undefined {
+  const listed = new RegExp(`^\\s*[-*]\\s+\\[[^\\]]+\\]\\(${slug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.md\\)\\s*:?\\s*(.+)$`, "m").exec(indexText)?.[1];
+  const first = clean(raw)
+    .split(/\r?\n\r?\n/)
+    .map((p) => p.trim())
+    .find((p) => p && !p.startsWith("#") && !p.startsWith("URL:"));
+  const text = frontDesc(raw) ?? (listed ? plain(listed).replace(/[.;]$/, "") : first ? plain(first) : undefined);
+  return text && text.length > 240 ? `${text.slice(0, 237).replace(/\s+\S*$/, "")}...` : text;
 }
 
 const TEXT = new Set([".md", ".mdx", ".txt"]);
@@ -228,7 +293,7 @@ async function collectSitemap(s: Source, applyExcludes: boolean): Promise<KbFile
         continue;
       }
       const md = pageToMarkdown(await res.text(), u, readOrigin, s.main);
-      out.push({ path: `${s.storePath}/${name}.md`, body: withUrl(u, md) });
+      out.push({ path: `${s.storePath}/${name}.md`, body: withUrl(u, md), desc: /^Description: (.+)$/m.exec(md)?.[1] });
     }
   };
   await Promise.all(Array.from({ length: 4 }, worker));
@@ -245,15 +310,19 @@ async function collect(): Promise<KbFile[]> {
     if (s.type === "sitemap") {
       files.push(...(await collectSitemap(s, mode === "both")));
     } else if (s.type === "dir") {
-      const dir = resolve(base, s.dir!);
+      const dir = resolve(sourceRoot(s), s.dir!);
+      const indexFile = s.index ? walk(dir).find((p) => basename(p).replace(/\.(md|mdx|txt)$/i, "") === s.index) : undefined;
+      const indexText = indexFile ? readFileSync(indexFile, "utf8") : "";
       for (const full of walk(dir)) {
         const rel = relative(dir, full).replace(/\\/g, "/");
         const slug = rel.replace(/\.(md|mdx|txt)$/i, "");
         const url = s.index && slug === s.index ? s.pageUrl!.replace(/\/?\{slug\}$/, "") : s.pageUrl!.replace("{slug}", slug);
-        files.push({ path: `${s.storePath}/${slug}.md`, body: withUrl(url, linkPages(clean(readFileSync(full, "utf8")), s, slug, url)) });
+        const raw = readFileSync(full, "utf8");
+        files.push({ path: `${s.storePath}/${slug}.md`, body: withUrl(url, linkPages(clean(raw), s, slug, url)), desc: docDesc(raw, slug, indexText) });
       }
     } else if (s.type === "file") {
-      files.push({ path: s.storePath, body: withUrl(s.pageUrl!, clean(readFileSync(resolve(base, s.file!), "utf8"))) });
+      const raw = readFileSync(resolve(sourceRoot(s), s.file!), "utf8");
+      files.push({ path: s.storePath, body: withUrl(s.pageUrl!, clean(raw)), desc: frontDesc(raw) });
     } else {
       const res = await fetch(s.url!);
       if (!res.ok) throw new Error(`${s.url}: HTTP ${res.status}`);
@@ -335,19 +404,134 @@ async function listAll(store: string, path = ""): Promise<string[]> {
   return out;
 }
 
-// ---------- site map ----------
+// ---------- site brief ----------
 
-/** One line per file: title, page address, store path. Goes into every chat's prompt, so it holds nothing that drifts. */
-function siteMap(files: KbFile[]): string {
-  return files
-    .map((f) => {
-      const url = /^URL: (.+)$/m.exec(f.body)?.[1]?.trim() ?? "";
-      const title = (/^# (.+)$/m.exec(f.body)?.[1] ?? /^Title: (.+)$/m.exec(f.body)?.[1] ?? f.path).replace(/\*\*/g, "").trim();
-      const page = /^https?:/.test(url) ? url : "no page";
-      return `- ${title} - ${page} - ${f.path.replace(/^\/+/, "")}`;
+/** A synced page's Markdown, made compact for the prompt: headings become bold lines, link-only clutter goes. */
+function tidy(md: string): string {
+  return md
+    .replace(/^(URL|Title|Description): .*$/gm, "")
+    .replace(/\[\s*\n+\s*#{1,6} ([^\n]+?)\s*\n+\s*\]\(([^)\s]+)\)/g, "**$1** - $2")
+    .replace(/^#{1,6} (.+)$/gm, "**$1**")
+    .replace(/^\[(?:Read more|Read post →)\]\([^)]*\)\s*$/gm, "")
+    .replace(/^.*\+\d+ more\s*$/gm, "")
+    .replace(/^((?:Up to )?[\d.,]+\+?%?)\n\n(?=[A-Z])/gm, "$1 ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/** Chosen "## " sections of a page, in the order asked; "" is the part before the first section. */
+function pageSections(body: string, wanted: string[], warnings: string[], path: string): string {
+  const [intro = "", ...rest] = body.split(/^## /m);
+  const byTitle = new Map(rest.map((p) => [p.slice(0, p.indexOf("\n")).trim(), p.slice(p.indexOf("\n") + 1)]));
+  return wanted
+    .map((w) => {
+      if (w === "") return tidy(intro);
+      const text = byTitle.get(w);
+      if (text === undefined) warnings.push(`brief: no "## ${w}" section in ${path} any more`);
+      return text === undefined ? "" : `#### ${w}\n\n${tidy(text)}`;
     })
-    .sort((a, b) => a.localeCompare(b))
-    .join("\n");
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+/** Newest stable release and any newer pre-release, from the GitHub releases feed (the API refuses many anonymous callers). */
+async function releaseLines(repo: string): Promise<string> {
+  const res = await fetch(`https://github.com/${repo}/releases.atom`);
+  if (!res.ok) throw new Error(`releases feed HTTP ${res.status}`);
+  const entries = [...(await res.text()).matchAll(/<entry>([\s\S]*?)<\/entry>/g)].map((m) => {
+    const e = m[1]!;
+    const link = /<link[^>]+href="([^"]+)"/.exec(e)?.[1] ?? "";
+    const title = (/<title>([^<]*)<\/title>/.exec(e)?.[1] ?? "").replace(/&amp;/g, "&").trim();
+    return { title, link, date: /<updated>([^<]{10})/.exec(e)?.[1] ?? "", pre: /-/.test(link.split("/tag/")[1] ?? "") };
+  });
+  const stable = entries.findIndex((e) => !e.pre);
+  const beta = entries.findIndex((e) => e.pre);
+  const line = (label: string, e: (typeof entries)[number]) => `- ${label}: ${e.title} (${e.date}) - ${e.link}`;
+  const out: string[] = [];
+  if (stable >= 0) out.push(line("Stable", entries[stable]!));
+  if (beta >= 0 && (stable < 0 || beta < stable)) out.push(line("Beta (newer features, still being tested)", entries[beta]!));
+  return out.join("\n");
+}
+
+const pageTitle = (f: KbFile) => (/^# (.+)$/m.exec(f.body)?.[1] ?? /^Title: (.+)$/m.exec(f.body)?.[1] ?? f.path).replace(/\*\*/g, "").trim();
+
+/** About, latest releases, and every page with its summary, address and store file. Part of every chat's prompt. */
+async function buildBrief(files: KbFile[]): Promise<{ text: string; problems: string[]; warnings: string[] }> {
+  const b = cfg.brief ?? {};
+  const problems: string[] = [];
+  const warnings: string[] = [];
+  const parts: string[] = [];
+
+  const about: string[] = [];
+  for (const a of b.about ?? []) {
+    if (a.url) {
+      const res = await fetch(a.url).catch(() => null);
+      if (!res?.ok) {
+        problems.push(`brief: couldn't read ${a.url} (${res ? `HTTP ${res.status}` : "unreachable"})`);
+        continue;
+      }
+      const text = (await res.text()).split(/^## /m)[0]!.replace(/^# .*$/m, "").replace(/^> ?/gm, "").trim();
+      about.push(htmlPageLinks(text, new URL(a.url).origin));
+    } else if (a.file) {
+      const f = files.find((x) => x.path === a.file);
+      if (!f) problems.push(`brief: ${a.file} wasn't synced`);
+      else about.push(pageSections(f.body, a.sections ?? [""], warnings, a.file));
+    }
+  }
+  if (about.length) parts.push(`### About ${cfg.site.name}\n\n${about.join("\n\n")}`);
+
+  if (b.releases) {
+    try {
+      const lines = await releaseLines(b.releases);
+      if (lines) parts.push(`### Latest releases\n\n${lines}`);
+    } catch (e) {
+      warnings.push(`brief: releases left out (${e instanceof Error ? e.message : String(e)})`);
+    }
+  }
+
+  const groups = b.groups?.length ? b.groups : [{ label: "Pages", match: "" }];
+  const listed = new Map<string, string[]>(groups.map((g) => [g.label, []]));
+  for (const f of files) {
+    const path = f.path.replace(/^\/+/, "");
+    const g = groups.find((x) => path.startsWith(x.match));
+    if (!g) continue;
+    const url = /^URL: (.+)$/m.exec(f.body)?.[1]?.trim() ?? "";
+    const desc = f.desc?.replace(/\s+/g, " ").trim();
+    listed.get(g.label)!.push(`- ${pageTitle(f)}${desc ? ` - ${desc}` : ""} - ${/^https?:/.test(url) ? url : "no page"} - file: ${path}`);
+  }
+  const pages = [...listed]
+    .filter(([, lines]) => lines.length)
+    .map(([label, lines]) => `#### ${label}\n\n${lines.sort((x, y) => x.localeCompare(y)).join("\n")}`);
+  parts.push(`### Pages\n\nEach line: title - summary - page address - file in your store.\n\n${pages.join("\n\n")}`);
+
+  return { text: parts.join("\n\n"), problems, warnings };
+}
+
+// ---------- last result per site (.sync-state.json) ----------
+
+interface SiteState {
+  lastRun: string;
+  result: "ok" | "unchanged" | "failed";
+  lastChange?: string;
+  fingerprint?: string;
+  files?: number;
+  problems?: string[];
+}
+
+const statePath = join(import.meta.dirname, ".sync-state.json");
+const readState = (): Record<string, SiteState> => {
+  try {
+    return JSON.parse(readFileSync(statePath, "utf8")) as Record<string, SiteState>;
+  } catch {
+    return {};
+  }
+};
+/** Kept for --live runs only: the Sitrep reads it, and the next run compares against the last good fingerprint. */
+function saveState(patch: Partial<SiteState> & { result: SiteState["result"] }): void {
+  if (!live || dryRun) return;
+  const all = readState();
+  all[cfg.site.key] = { ...all[cfg.site.key], ...patch, lastRun: new Date().toISOString() };
+  writeFileSync(statePath, `${JSON.stringify(all, null, 2)}\n`);
 }
 
 // ---------- safety checks ----------
@@ -376,43 +560,7 @@ async function alertFailure(problems: string[]): Promise<void> {
   }).catch(() => undefined);
 }
 
-/** Asks the live bot one question as a test visitor (owner pass: no Turnstile, no alerts); returns a problem or null. */
-async function askLiveBot(server: string, question: string): Promise<string | null> {
-  const origin = (cfg.site.origins as string[] | undefined)?.find((o) => o.startsWith("https://dev.")) ?? (cfg.site.origins as string[] | undefined)?.[0];
-  if (!origin) return "no site origin to test from";
-  const passRes = await serverFetch(`${server}/api/dev-pass`, { headers: { Authorization: `Bearer ${need("API_TOKEN")}` } });
-  const { pass } = (await passRes.json()) as { pass: string };
-  const sRes = await serverFetch(`${server}/api/session`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Origin: origin },
-    body: JSON.stringify({ site: cfg.site.key, newChat: true, page: { url: `${origin}/`, title: "Home", referrer: "" }, device: { width: 1280, touch: false, lang: "en", tz: "UTC" }, dev: { brain: "real", pass } }),
-  });
-  const s = (await sRes.json()) as { token?: string; wsUrl?: string };
-  if (!s.token) return `test session failed (HTTP ${sRes.status})`;
-  const wsBase = server.replace(/^http/, "ws");
-  return new Promise((done) => {
-    const ws = new WebSocket(`${wsBase}${s.wsUrl}?token=${encodeURIComponent(s.token!)}&page=/`, { headers: { Origin: origin }, ...(pinned ? { dispatcher: pinned } : {}) });
-    const timer = setTimeout(() => finish("the live bot didn't answer within 70 s"), 70_000);
-    const finish = (problem: string | null) => {
-      clearTimeout(timer);
-      try {
-        ws.close();
-      } catch {
-        // already closed
-      }
-      done(problem);
-    };
-    ws.onopen = () => ws.send(JSON.stringify({ t: "send", id: `m${Date.now()}`, text: question }));
-    ws.onerror = () => finish("couldn't connect to the live bot");
-    ws.onmessage = (e) => {
-      const d = String(e.data);
-      if (d.startsWith("D") || d.startsWith("B")) return;
-      const m = JSON.parse(d) as { t: string; status?: { mode?: string }; message?: { role: string; text: string } };
-      if (m.t === "status" && m.status?.mode === "form") finish("the live bot gave no answer (contact form shown)");
-      if (m.t === "message" && m.message?.role === "ai") finish(m.message.text.trim().length > 20 ? null : "the live bot's answer was empty");
-    };
-  });
-}
+
 
 // ---------- main ----------
 
@@ -422,15 +570,28 @@ async function main(): Promise<void> {
   const warnings: string[] = [];
   console.log(`${files.length} files for store "${cfg.site.storeName}"`);
   if (skippedPaths.length) warnings.push(`${skippedPaths.length} live page(s) couldn't be fetched; their old copies were kept`);
+  const brief = await buildBrief(files);
+  warnings.push(...brief.warnings);
+  const instruction = readFileSync(resolve(base, cfg.instructionFile), "utf8");
+  const server = (env.CHATBOT_SERVER ?? env.PUBLIC_URL ?? "").replace(/\/$/, "");
+  const fingerprint = digest(JSON.stringify({ files, brief: brief.text, instruction, site: cfg.site, server }));
+
   if (dryRun) {
     for (const f of files) console.log(`  ${f.path}  (${f.body.length} chars)  ${f.body.split("\n", 1)[0]}`);
     const show = opt("--show");
     const hit = show && files.find((f) => f.path === show || f.path === `${show}.md` || f.path.endsWith(`/${show}`) || f.path.endsWith(`/${show}.md`));
     if (hit) console.log(`\n----- ${hit.path} -----\n${hit.body}`);
-    if (show === "sitemap") console.log(`\n----- site map -----\n${siteMap(files)}`);
-    const pre = preflight(files, 0);
+    if (show === "brief") console.log(`\n----- site brief -----\n${brief.text}`);
+    const pre = [...preflight(files, 0), ...brief.problems];
     if (pre.length) console.log(`\nchecks would stop a real sync:\n  ${pre.join("\n  ")}`);
+    for (const w of warnings) console.log(`warning: ${w}`);
   } else {
+    const last = readState()[cfg.site.key];
+    if (live && !flag("--full") && last?.fingerprint === fingerprint && last.result !== "failed") {
+      saveState({ result: "unchanged" });
+      console.log(`\nSYNC OK (nothing changed since ${last.lastChange ?? last.lastRun})`);
+      return;
+    }
     let store = await storeId(cfg.site.storeName);
     if (!store) {
       if (!flag("--create-store")) throw new Error(`No memory store named "${cfg.site.storeName}". Run again with --create-store to create it.`);
@@ -440,9 +601,10 @@ async function main(): Promise<void> {
       console.log(`created store ${store}`);
     }
     const before = (await listAll(store)).map((p) => p.replace(/^\/+/, ""));
-    const pre = preflight(files, before.length);
+    const pre = [...preflight(files, before.length), ...brief.problems];
     if (pre.length && !force) {
       console.log(`\nSYNC FAILED before changing the store (run again with --force to override):\n  ${pre.join("\n  ")}`);
+      saveState({ result: "failed", problems: pre });
       await alertFailure(pre);
       process.exit(1);
     }
@@ -470,7 +632,7 @@ async function main(): Promise<void> {
             if (cur) await omnara("DELETE", `/memory-stores/${store}/file?path=${encodeURIComponent(p)}&expected_digest=${encodeURIComponent(cur)}`);
           }
         }
-        console.log(`removed ${stale.length} files no longer in the site`);
+        console.log(`removed ${stale.length} files no longer in the site: ${stale.join(", ")}`);
       } else {
         console.log(`${stale.length} files in the store are no longer in the site (run with --prune to remove):`);
         for (const p of stale) console.log(`  ${p}`);
@@ -490,12 +652,10 @@ async function main(): Promise<void> {
   }
 
   if (!flag("--no-push")) {
-    const instruction = readFileSync(resolve(base, cfg.instructionFile), "utf8");
-    const site = { ...cfg.site, instruction, siteMap: siteMap(files) };
-    const server = (env.CHATBOT_SERVER ?? env.PUBLIC_URL ?? "").replace(/\/$/, "");
+    const site = { ...cfg.site, instruction, siteBrief: brief.text };
     if (!server) throw new Error("Missing CHATBOT_SERVER (or PUBLIC_URL)");
     if (dryRun) {
-      console.log(`would push site config "${cfg.site.key}" to ${server} (site map: ${files.length} lines)`);
+      console.log(`would push site config "${cfg.site.key}" to ${server} (site brief: ${brief.text.length} chars)`);
       return;
     }
     const res = await serverFetch(`${server}/api/sync/site`, {
@@ -505,23 +665,18 @@ async function main(): Promise<void> {
     });
     if (res.ok) console.log(`pushed site config "${cfg.site.key}" to ${server}`);
     else problems.push(`config push failed: HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
-
-    if (live && res.ok) {
-      const question = (cfg.site.starters as { path: string; prompts: string[] }[] | undefined)?.find((s) => s.path === "/")?.prompts[0] ?? `What is ${cfg.site.name}?`;
-      console.log(`asking the live bot: "${question}"`);
-      const p = await askLiveBot(server, question);
-      if (p) problems.push(p);
-      else console.log("the live bot answered");
-    }
   }
 
   if (dryRun) return;
   for (const w of warnings) console.log(`warning: ${w}`);
   if (problems.length) {
     console.log(`\nSYNC FAILED:\n  ${problems.join("\n  ")}`);
+    saveState({ result: "failed", problems });
     await alertFailure(problems);
     process.exitCode = 1;
   } else {
+    const now = new Date().toISOString();
+    saveState({ result: "ok", lastChange: now, fingerprint, files: files.length, problems: [] });
     console.log(`\nSYNC OK${warnings.length ? ` (${warnings.length} warning${warnings.length === 1 ? "" : "s"})` : ""}`);
   }
 }
@@ -531,6 +686,7 @@ main().then(
   async (e: unknown) => {
     const why = e instanceof Error ? e.message : String(e);
     console.error(`\nSYNC FAILED: ${why}`);
+    saveState({ result: "failed", problems: [why] });
     await alertFailure([why]);
     process.exit(1);
   },
