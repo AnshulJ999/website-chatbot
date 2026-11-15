@@ -44,11 +44,15 @@ async function loadSite(server: string, key: string): Promise<PublicSiteConfig |
     // no cache; wait for the network
   }
   try {
+    const presence = fetch(`${server}/api/presence`, { cache: "no-store" })
+      .then((r) => (r.ok ? (r.json() as Promise<{ ownerOnline: boolean }>) : null))
+      .catch(() => null);
     const res = await fetch(`${server}/api/site/${encodeURIComponent(key)}`);
     if (!res.ok) return site.value;
-    const data = (await res.json()) as { site: PublicSiteConfig; ownerOnline: boolean };
+    const data = (await res.json()) as { site: PublicSiteConfig };
     site.value = data.site;
-    patch({ status: { ...live.value.status, ownerOnline: data.ownerOnline } });
+    const p = await presence;
+    if (p) patch({ status: { ...live.value.status, ownerOnline: p.ownerOnline } });
     try {
       localStorage.setItem(SITE_CACHE(key), JSON.stringify(data.site));
     } catch {

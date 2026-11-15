@@ -97,6 +97,8 @@ export function App() {
   };
 
   const s = overview?.settings;
+  // Available and Do not disturb are fixed, so they show at once; Auto waits for the server's answer.
+  const shownOnline = s?.presence === "available" ? true : s?.presence === "away" ? false : online;
   const inChat = route.page === "chats" && !!route.id;
   const title = NAV.find((n) => n.page === route.page)?.label ?? "Chats";
 
@@ -109,8 +111,8 @@ export function App() {
         </button>
         <h1 className="flex-1 text-base font-semibold">{title}</h1>
         <span className="flex items-center gap-1.5 px-2 text-xs text-muted-fg">
-          <span className={`h-2 w-2 rounded-full ${online ? "bg-ok" : "bg-border"}`} aria-hidden />
-          {online ? "Online" : "Away"}
+          <span className={`h-2 w-2 rounded-full ${shownOnline ? "bg-ok" : "bg-border"}`} aria-hidden />
+          {shownOnline ? "Online" : "Away"}
         </span>
       </header>
 
@@ -142,7 +144,7 @@ export function App() {
         </nav>
         {s && (
           <div className="mt-auto space-y-3 border-t border-border px-4 py-3">
-            <PresenceControl settings={s} online={online} onSave={saveSettings} />
+            <PresenceControl settings={s} online={shownOnline} onSave={saveSettings} />
             {!s.aiEnabled && (
               <a href="#/settings" className="block text-xs text-warn underline">
                 AI answers are off

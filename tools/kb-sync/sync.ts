@@ -64,12 +64,26 @@ interface SyncConfig {
 
 /** The site brief at the end of every prompt, generated at each sync. */
 interface BriefConfig {
-  /** What the site says about itself: the top of a text page before its first "## " heading (e.g. /llms.txt), or chosen "## " sections of a synced page ("" = the part before the first one). */
-  about?: { url?: string; file?: string; sections?: string[] }[];
+  /** Shown first, under "About <site>". */
+  about?: BriefPart[];
   /** owner/repo: the newest stable release and any newer pre-release, from its GitHub releases feed. */
   releases?: string;
   /** Page list groups, first match wins: `match` is a store path prefix ("" matches everything left). */
   groups?: { label: string; match: string }[];
+  /** Name live pages by their main heading (default) or by their <title> before " - " / ":" ("title"). */
+  pageNames?: "heading" | "title";
+  /** "- [name](address) (details): summary" lists in text pages: a page with that address takes the name and details, with the summary under its line. */
+  lists?: { url: string; sections: string[] }[];
+  /** Shown after the pages, each section under its own heading. */
+  after?: BriefPart[];
+}
+
+/** A text page (`url`, e.g. /llms.txt) or a synced file (`file`, a store path): its intro before the first "## " heading, or the named "## " sections. `from` names the source in each heading. */
+interface BriefPart {
+  url?: string;
+  file?: string;
+  sections?: string[];
+  from?: string;
 }
 
 const args = process.argv.slice(2);
@@ -78,7 +92,7 @@ const opt = (f: string) => {
   const i = args.indexOf(f);
   return i >= 0 ? args[i + 1] : undefined;
 };
-const configPath = args.find((a, i) => !a.startsWith("--") && args[i - 1] !== "--env" && args[i - 1] !== "--show");
+const configPath = args.find((a, i) => !a.startsWith("--") && !["--env", "--show", "--dump"].includes(args[i - 1] ?? ""));
 if (!configPath) {
   console.error("Usage: node sync.ts <chatbot.config.json> [--env <file>] [--dry-run] [--prune] [--create-store] [--no-push]");
   process.exit(2);
@@ -197,6 +211,23 @@ function clean(text: string): string {
 
 const withUrl = (url: string, body: string) => `URL: ${url}\n\n${body}\n`;
 
+/** A single file's own links (README style: `SECURITY.md`, `../../releases`) made absolute against its page; images and HTML layout tags go. */
+function absoluteLinks(body: string, pageUrl: string): string {
+  return body
+    .replace(/<h([1-6])[^>]*>([\s\S]*?)<\/h\1>/g, (_m, n: string, inner: string) => `${"#".repeat(Number(n))} ${inner.replace(/<[^>]+>/g, "").trim()}`)
+    .replace(/!\[[^\]]*\]\([^)]*\)[ \t]*\n?/g, "")
+    .replace(/<img[^>]*>/g, "")
+    .replace(/<\/?(?:p|h[1-6]|b|strong|a|div|br)\b[^>]*>/g, "")
+    .replace(/\]\((?!https?:|mailto:|#)([^)\s]+)\)/g, (m, link: string) => {
+      try {
+        return `](${new URL(link, pageUrl).href})`;
+      } catch {
+        return m;
+      }
+    });
+}
+const noEmDash = (s: string) => s.replace(/\s*\u2014\s*/g, " - ");
+
 /** llms.txt-style files link the site's pages as ".md" copies; visitors need the normal pages. */
 function htmlPageLinks(body: string, origin: string): string {
   const site = origin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -232,8 +263,16 @@ export function pageToMarkdown(html: string, publicUrl: string, readOrigin: stri
   const title = (document.querySelector("title")?.textContent ?? "").trim();
   const description = document.querySelector('meta[name="description"]')?.getAttribute("content")?.trim() ?? "";
   const root = document.querySelector(selector) ?? document.querySelector("main") ?? document.body;
-  const drop = "nav, footer, script, style, noscript, iframe, svg, canvas, video, audio, img, picture, form, button, dialog, [aria-hidden='true'], [hidden], .sr-only, [data-dev-ui]";
+  // Icons that carry meaning (a tick labelled "Included") become their label before icons are dropped.
+  for (const el of root.querySelectorAll("svg[aria-label], img[alt], [role='img'][aria-label]")) {
+    const label = (el.getAttribute("aria-label") ?? el.getAttribute("alt") ?? "").trim();
+    if (label && el.getAttribute("aria-hidden") !== "true") el.replaceWith(document.createTextNode(` ${label} `));
+  }
+  const drop =
+    "nav, footer, script, style, noscript, iframe, svg, canvas, video, audio, img, picture, form, button, dialog, input, select, textarea, label, output, [role='slider'], [aria-hidden='true'], [hidden], .sr-only, [data-dev-ui]";
   for (const el of root.querySelectorAll(drop)) el.remove();
+  // Text in neighbouring elements (a price and its period, a number and its label) keeps a space between.
+  for (const el of root.querySelectorAll("*")) if (el.nextSibling?.nodeType === 1) el.after(document.createTextNode(" "));
   const publicOrigin = new URL(publicUrl).origin;
   for (const a of root.querySelectorAll("a[href]")) {
     const href = a.getAttribute("href") ?? "";
@@ -248,6 +287,8 @@ export function pageToMarkdown(html: string, publicUrl: string, readOrigin: stri
   let md = turndown
     .turndown(root.innerHTML)
     .replace(/\[\s*\]\([^)]*\)/g, "")
+    .replace(/^#{1,6} [^\n]+\n+(?=\* \* \*|$(?![\s\S]))/gm, "")
+    .replace(/^\* \* \*\s*$/gm, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
   if (!/^# /m.test(md) && title) md = `# ${title}\n\n${md}`;
@@ -322,7 +363,7 @@ async function collect(): Promise<KbFile[]> {
       }
     } else if (s.type === "file") {
       const raw = readFileSync(resolve(sourceRoot(s), s.file!), "utf8");
-      files.push({ path: s.storePath, body: withUrl(s.pageUrl!, clean(raw)), desc: frontDesc(raw) });
+      files.push({ path: s.storePath, body: withUrl(s.pageUrl!, absoluteLinks(clean(raw), s.pageUrl!)), desc: frontDesc(raw) });
     } else {
       const res = await fetch(s.url!);
       if (!res.ok) throw new Error(`${s.url}: HTTP ${res.status}`);
@@ -337,6 +378,11 @@ async function collect(): Promise<KbFile[]> {
       const text = readFileSync(full, "utf8").trim();
       files.push({ path: `curated/${rel}`, body: /^URL:/.test(text) ? `${text}\n` : `URL: none (background facts, no page to link)\n\n${text}\n` });
     }
+  }
+  // The bot copies the style it reads; its rules ask for hyphens.
+  for (const f of files) {
+    f.body = noEmDash(f.body);
+    if (f.desc) f.desc = noEmDash(f.desc);
   }
   return files;
 }
@@ -419,20 +465,25 @@ function tidy(md: string): string {
     .trim();
 }
 
-/** Chosen "## " sections of a page, in the order asked; "" is the part before the first section. */
-function pageSections(body: string, wanted: string[], warnings: string[], path: string): string {
+/** Chosen "## " sections of a page, in the order asked, each under `level` heading; "" is the part before the first section. */
+function pageSections(body: string, wanted: string[], warnings: string[], source: string, level = "####", from?: string): string {
   const [intro = "", ...rest] = body.split(/^## /m);
   const byTitle = new Map(rest.map((p) => [p.slice(0, p.indexOf("\n")).trim(), p.slice(p.indexOf("\n") + 1)]));
   return wanted
     .map((w) => {
-      if (w === "") return tidy(intro);
+      if (w === "") return tidy(intro.replace(/^# .*$/m, "").replace(/^> ?/gm, ""));
       const text = byTitle.get(w);
-      if (text === undefined) warnings.push(`brief: no "## ${w}" section in ${path} any more`);
-      return text === undefined ? "" : `#### ${w}\n\n${tidy(text)}`;
+      if (text === undefined) warnings.push(`brief: no "## ${w}" section in ${source} any more`);
+      return text === undefined ? "" : `${level} ${w}${from ? ` (from ${from})` : ""}\n\n${tidy(text)}`;
     })
     .filter(Boolean)
     .join("\n\n");
 }
+
+const sameAddress = (a: string, b: string) => {
+  const norm = (u: string) => u.trim().replace(/^https?:\/\/(www\.)?/i, "").replace(/\.md$/, "").replace(/\/$/, "").toLowerCase();
+  return norm(a) === norm(b);
+};
 
 /** Newest stable release and any newer pre-release, from the GitHub releases feed (the API refuses many anonymous callers). */
 async function releaseLines(repo: string): Promise<string> {
@@ -455,29 +506,44 @@ async function releaseLines(repo: string): Promise<string> {
 
 const pageTitle = (f: KbFile) => (/^# (.+)$/m.exec(f.body)?.[1] ?? /^Title: (.+)$/m.exec(f.body)?.[1] ?? f.path).replace(/\*\*/g, "").trim();
 
-/** About, latest releases, and every page with its summary, address and store file. Part of every chat's prompt. */
+/** A live page's short name from its <title>: the part before " - ", " | " or ": " ("Pricing - KopiaLens: ..." is "Pricing"). */
+function shortTitle(f: KbFile): string {
+  if (/(^|\/)home\.md$/.test(f.path)) return "Home";
+  const t = /^Title: (.+)$/m.exec(f.body)?.[1]?.trim();
+  if (!t) return pageTitle(f);
+  const sep = [" - ", " | ", ": "].find((s) => t.includes(s));
+  return sep ? t.slice(0, t.indexOf(sep)).trim() : t;
+}
+
+/** About, latest releases, every page (name - address - file, with the site's own summary where it gives one), then any closing sections. Part of every chat's prompt. */
 async function buildBrief(files: KbFile[]): Promise<{ text: string; problems: string[]; warnings: string[] }> {
   const b = cfg.brief ?? {};
   const problems: string[] = [];
   const warnings: string[] = [];
   const parts: string[] = [];
 
-  const about: string[] = [];
-  for (const a of b.about ?? []) {
-    if (a.url) {
-      const res = await fetch(a.url).catch(() => null);
-      if (!res?.ok) {
-        problems.push(`brief: couldn't read ${a.url} (${res ? `HTTP ${res.status}` : "unreachable"})`);
-        continue;
-      }
-      const text = (await res.text()).split(/^## /m)[0]!.replace(/^# .*$/m, "").replace(/^> ?/gm, "").trim();
-      about.push(htmlPageLinks(text, new URL(a.url).origin));
-    } else if (a.file) {
-      const f = files.find((x) => x.path === a.file);
-      if (!f) problems.push(`brief: ${a.file} wasn't synced`);
-      else about.push(pageSections(f.body, a.sections ?? [""], warnings, a.file));
+  const pages = new Map<string, Promise<string | null>>();
+  const textPage = (url: string) => {
+    if (!pages.has(url))
+      pages.set(
+        url,
+        fetch(url)
+          .then(async (r) => (r.ok ? htmlPageLinks(await r.text(), new URL(url).origin) : (problems.push(`brief: couldn't read ${url} (HTTP ${r.status})`), null)))
+          .catch(() => (problems.push(`brief: couldn't read ${url} (unreachable)`), null)),
+      );
+    return pages.get(url)!;
+  };
+  const render = async (p: BriefPart, level: string): Promise<string> => {
+    const source = p.url ?? p.file ?? "";
+    const body = p.url ? await textPage(p.url) : (files.find((x) => x.path === p.file)?.body ?? null);
+    if (body === null) {
+      if (p.file) problems.push(`brief: ${p.file} wasn't synced`);
+      return "";
     }
-  }
+    return pageSections(body, p.sections ?? [""], warnings, source, level, p.from);
+  };
+
+  const about = (await Promise.all((b.about ?? []).map((p) => render(p, "####")))).filter(Boolean);
   if (about.length) parts.push(`### About ${cfg.site.name}\n\n${about.join("\n\n")}`);
 
   if (b.releases) {
@@ -489,22 +555,40 @@ async function buildBrief(files: KbFile[]): Promise<{ text: string; problems: st
     }
   }
 
+  // Names, details and summaries the site gives its own pages in list form, in the site's order.
+  const items: { name: string; details?: string; summary: string; address: string }[] = [];
+  for (const l of b.lists ?? []) {
+    const body = await textPage(l.url);
+    if (body === null) continue;
+    const text = pageSections(body, l.sections, warnings, l.url, "####");
+    for (const m of text.matchAll(/^- \[([^\]]+)\]\(([^)\s]+)\)(?: \(([^)]*)\))?:\s*(.+)$/gm)) items.push({ name: m[1]!, address: m[2]!, details: m[3], summary: m[4]!.trim() });
+  }
+
   const groups = b.groups?.length ? b.groups : [{ label: "Pages", match: "" }];
-  const listed = new Map<string, string[]>(groups.map((g) => [g.label, []]));
+  const listed = new Map<string, { order: number; key: string; line: string }[]>(groups.map((g) => [g.label, []]));
   for (const f of files) {
     const path = f.path.replace(/^\/+/, "");
     const g = groups.find((x) => path.startsWith(x.match));
     if (!g) continue;
     const url = /^URL: (.+)$/m.exec(f.body)?.[1]?.trim() ?? "";
-    const desc = f.desc?.replace(/\s+/g, " ").trim();
-    listed.get(g.label)!.push(`- ${pageTitle(f)}${desc ? ` - ${desc}` : ""} - ${/^https?:/.test(url) ? url : "no page"} - file: ${path}`);
+    const page = /^https?:/.test(url) ? url : "no page";
+    const i = items.findIndex((it) => sameAddress(it.address, url));
+    const it = items[i];
+    const name = it ? `${it.name}${it.details ? ` (${it.details})` : ""}` : b.pageNames === "title" && /^Title: /m.test(f.body) ? shortTitle(f) : pageTitle(f);
+    listed.get(g.label)!.push({ order: it ? i : Number.MAX_SAFE_INTEGER, key: path, line: `- ${name} - ${page} - file: ${path}${it ? `\n  ${it.summary}` : ""}` });
   }
-  const pages = [...listed]
+  const pageText = [...listed]
     .filter(([, lines]) => lines.length)
-    .map(([label, lines]) => `#### ${label}\n\n${lines.sort((x, y) => x.localeCompare(y)).join("\n")}`);
-  parts.push(`### Pages\n\nEach line: title - summary - page address - file in your store.\n\n${pages.join("\n\n")}`);
+    .map(([label, lines]) => `#### ${label}\n\n${lines.sort((x, y) => x.order - y.order || x.key.localeCompare(y.key)).map((l) => l.line).join("\n")}`);
+  const legend = `Each line: title - page address - file in your store${items.length ? "; a summary follows where the site gives one" : ""}.`;
+  parts.push(`### Pages\n\n${legend}\n\n${pageText.join("\n\n")}`);
 
-  return { text: parts.join("\n\n"), problems, warnings };
+  for (const p of b.after ?? []) {
+    const text = await render(p, "###");
+    if (text) parts.push(text);
+  }
+
+  return { text: noEmDash(parts.join("\n\n")), problems, warnings };
 }
 
 // ---------- last result per site (.sync-state.json) ----------
@@ -582,6 +666,8 @@ async function main(): Promise<void> {
     const hit = show && files.find((f) => f.path === show || f.path === `${show}.md` || f.path.endsWith(`/${show}`) || f.path.endsWith(`/${show}.md`));
     if (hit) console.log(`\n----- ${hit.path} -----\n${hit.body}`);
     if (show === "brief") console.log(`\n----- site brief -----\n${brief.text}`);
+    const dump = opt("--dump");
+    if (dump) writeFileSync(dump, JSON.stringify({ files, brief: brief.text }, null, 1));
     const pre = [...preflight(files, 0), ...brief.problems];
     if (pre.length) console.log(`\nchecks would stop a real sync:\n  ${pre.join("\n  ")}`);
     for (const w of warnings) console.log(`warning: ${w}`);

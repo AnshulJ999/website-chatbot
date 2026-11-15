@@ -194,12 +194,11 @@ app.get("/api/site/:key", async (c) => {
   const site = await siteFor(c.env, c.req.param("key"));
   if (!site) return c.json({ error: "unknown_site" }, 404);
   const settings = await db.getSettings(c.env.DB);
-  return c.json(
-    { site: toPublic(site), aiEnabled: settings.aiEnabled, ownerOnline: await ownerOnline(c.env) },
-    200,
-    { "Cache-Control": "public, max-age=600", "Access-Control-Allow-Origin": "*" },
-  );
+  return c.json({ site: toPublic(site), aiEnabled: settings.aiEnabled }, 200, { "Cache-Control": "public, max-age=600", "Access-Control-Allow-Origin": "*" });
 });
+
+/** Whether visitors see the owner as online, before a chat starts. Never cached, unlike the site config. */
+app.get("/api/presence", async (c) => c.json({ ownerOnline: await ownerOnline(c.env) }, 200, { "Cache-Control": "no-store", "Access-Control-Allow-Origin": "*" }));
 
 // ---------- machine API (kb-sync, Sitrep) ----------
 

@@ -41,8 +41,8 @@ export class Hub extends DurableObject<Env> {
   }
 
   /** Whether visitors see the owner as online: "available" or "away" as set in the inbox, or in "auto" recent activity on any device. */
-  async ownerPresent(): Promise<boolean> {
-    const s = await getSettings(this.env.DB);
+  async ownerPresent(fresh = false): Promise<boolean> {
+    const s = await getSettings(this.env.DB, fresh);
     if (s.presence !== "auto") return s.presence === "available";
     let last = (await this.ctx.storage.get<number>("closedActive")) ?? 0;
     for (const ws of this.ctx.getWebSockets()) last = Math.max(last, (ws.deserializeAttachment() as Attachment | null)?.lastActive ?? 0);
@@ -59,13 +59,14 @@ export class Hub extends DurableObject<Env> {
     this.send({ t: "enquiry", id });
   }
 
+  /** Settings changed in another isolate: read them fresh, or the cached copy would report the old status. */
   async settings(): Promise<void> {
     this.send({ t: "settings" });
-    await this.broadcastPresence();
+    await this.broadcastPresence(true);
   }
 
-  private async broadcastPresence(): Promise<void> {
-    this.send({ t: "presence", online: await this.ownerPresent() });
+  private async broadcastPresence(fresh = false): Promise<void> {
+    this.send({ t: "presence", online: await this.ownerPresent(fresh) });
   }
 
   private send(msg: HubMsg): void {
