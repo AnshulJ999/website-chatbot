@@ -12,7 +12,7 @@ export interface ChatMessage {
   /** Visitor's thumbs on an AI answer. */
   feedback?: 1 | -1;
   /** Shown to the owner only. */
-  meta?: { model?: string; costUsd?: number; emailed?: boolean; via?: "email" | "widget" | "inbox" };
+  meta?: { model?: string; costUsd?: number; emailed?: boolean; via?: "email" | "widget" | "inbox"; reason?: string };
 }
 
 /** ai = the AI answers; owner = the owner has taken over; form = Get in touch only. */

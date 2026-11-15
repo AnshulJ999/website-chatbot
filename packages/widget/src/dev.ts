@@ -1,7 +1,8 @@
 // Playground-only: applies the Design menu's look choices (data-d-* on <html>) and the Playground
 // panel's test setup (data-pg-*). Never part of the production widget bundle.
-import { DEFAULT_UI, type ChatMessage, type ChatStatus, type PublicSiteConfig, type WidgetUi } from "@website-chatbot/shared";
+import { DEFAULT_UI, type ChatMessage, type ChatStatus, type GreetingRepeat, type PublicSiteConfig, type WidgetUi } from "@website-chatbot/shared";
 import type { ChatClient } from "./client";
+import { greetingDue, greetingShown } from "./greeting";
 import type { WidgetOptions } from "./main";
 import { OWNER_NAMES, TALK_WORDING } from "./dev-wording";
 import { EMPTY_STATUS, forced, live, pageOverride, patch, site, ui, type View } from "./store";
@@ -30,12 +31,17 @@ export function initDev(_host: HTMLElement, opts: WidgetOptions, client: ChatCli
       const talkLabel = (d.dTalkword && TALK_WORDING[d.dTalkword]) || base.talkLabel;
       const greetOn = d.dGreeting ? d.dGreeting === "on" : base.proactive.enabled;
       const delaySec = Number(d.dGreetdelay) || base.proactive.delaySec;
-      const proactive = { ...base.proactive, enabled: greetOn, delaySec, text: base.proactive.text || `Questions about ${site.value.name}? Ask here.` };
+      const repeat = (d.dGreetrepeat ?? base.proactive.repeat ?? "session") as GreetingRepeat;
+      const proactive = { ...base.proactive, enabled: greetOn, delaySec, repeat, text: base.proactive.text || `Questions about ${site.value.name}? Ask here.` };
       const next = { ...site.value, talkLabel, ownerName: ownerName || base.ownerName, proactive };
       const p = site.value.proactive;
-      if (next.talkLabel !== site.value.talkLabel || next.ownerName !== site.value.ownerName || p.enabled !== greetOn || p.delaySec !== delaySec || p.text !== proactive.text) site.value = next;
+      if (next.talkLabel !== site.value.talkLabel || next.ownerName !== site.value.ownerName || p.enabled !== greetOn || p.delaySec !== delaySec || p.repeat !== repeat || p.text !== proactive.text) site.value = next;
       clearTimeout(bubbleTimer);
-      if (greetOn && !live.value.open && !live.value.messages.length) bubbleTimer = window.setTimeout(() => patch({ bubble: true }), delaySec * 1000);
+      if (greetOn && !live.value.open && !live.value.messages.length && greetingDue(repeat))
+        bubbleTimer = window.setTimeout(() => {
+          patch({ bubble: true });
+          greetingShown();
+        }, delaySec * 1000);
       else if (!greetOn) patch({ bubble: false });
     }
 

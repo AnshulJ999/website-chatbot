@@ -114,6 +114,7 @@ function designRows() {
     wordingRow("owner", "What the bot calls you", "Shows in the \"asked to join\", \"is here\", away-form, message-sent and offline texts, and in the AI's replies. Starts a new chat when changed.", OWNER_NAMES, cfg?.ownerName),
     { key: "greeting", label: "Pop-up greeting", note: "A small bubble above the closed chat button. Shows only while the chat is closed and empty.", options: [opt("off", "Off"), opt("on", "On")], fallback: cfg?.proactive.enabled ? "on" : "off" },
     { key: "greetdelay", label: "Greeting delay", note: "Seconds after the page loads.", options: delays.map((s) => opt(s, `${s} seconds`)), fallback: delay },
+    { key: "greetrepeat", label: "Greeting shows", note: "How often one visitor sees it. New visitor in the panel resets it.", options: [opt("session", "Once per tab"), opt("day", "Once a day"), opt("page", "Every page load")], fallback: cfg?.proactive.repeat ?? "session" },
   ];
 }
 

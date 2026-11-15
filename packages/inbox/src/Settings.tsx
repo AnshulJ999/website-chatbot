@@ -107,6 +107,7 @@ export function Settings({ overview, onSave }: { overview: Overview; onSave: (p:
             <Num label="Longest a visitor waits for an answer, all models included (seconds)" value={draft.turnTimeoutSec} onChange={(v) => set("turnTimeoutSec", v)} />
             <Num label={'Show "Still working on it" when no words after (seconds)'} value={draft.stillWorkingSec} onChange={(v) => set("stillWorkingSec", v)} />
             <Num label="Status Auto: show me as away after this many idle minutes" value={draft.awayAfterMin} onChange={(v) => set("awayAfterMin", v)} />
+            <Num label="Hand a chat back to the AI when I haven't replied for (minutes, 0 = never)" value={draft.handBackAfterMin} onChange={(v) => set("handBackAfterMin", v)} />
             <Num label="Failures before a cooldown" value={draft.cooldownAfterFailures} onChange={(v) => set("cooldownAfterFailures", v)} />
             <Num label="Cooldown length (minutes)" value={draft.cooldownMinutes} onChange={(v) => set("cooldownMinutes", v)} />
             <Num label="Archive idle chats on Omnara after (days)" value={draft.archiveAfterDays} onChange={(v) => set("archiveAfterDays", v)} />
@@ -117,6 +118,7 @@ export function Settings({ overview, onSave }: { overview: Overview; onSave: (p:
           <Toggle label="Stream answers word by word" hint="Off: each answer appears when it's finished. A chat whose answer was cut off stops streaming on its own." checked={draft.streaming} onChange={(v) => set("streaming", v)} />
           <Num label="Send streamed words in batches every (ms, 0 = each piece at once)" value={draft.deltaBatchMs} step={10} onChange={(v) => set("deltaBatchMs", v)} />
           <Toggle label="Alert me about every new chat" hint="Off: alerts only for messages and requests for you" checked={draft.alertOnNewChat} onChange={(v) => set("alertOnNewChat", v)} />
+          <Toggle label="Hand a chat back to the AI when I'm away" hint="When the visitor writes while you show as away or Do not disturb" checked={draft.handBackWhenAway} onChange={(v) => set("handBackWhenAway", v)} />
         </Card>
 
         <Card title="Inbox">

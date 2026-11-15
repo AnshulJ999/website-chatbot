@@ -79,6 +79,8 @@ interface RoomState {
   location?: string;
   /** Messages exchanged while the owner had the chat; given to the AI on hand-back. */
   handBack: string[];
+  /** When a visitor message still unanswered by the owner hands the chat back to the AI. */
+  handBackAt?: number;
   /** Set while an answer is being produced; still set after a restart means the answer was cut off. */
   turnDeadline?: number;
   /** The model and question of the answer in progress, for finishing it after a cut-off. */
@@ -270,7 +272,10 @@ export class ChatRoom extends DurableObject<Env> {
     }
     if (this.st.mode === "owner") {
       this.st.handBack.push(`Visitor: ${text}`);
+      if (settings.handBackWhenAway && !this.online) return this.autoHandBack("away", settings, site);
+      if (settings.handBackAfterMin > 0 && !this.st.handBackAt) this.st.handBackAt = Date.now() + settings.handBackAfterMin * 60_000;
       await this.save();
+      await this.scheduleAlarm();
       if (!this.ctx.getWebSockets("owner").length) {
         this.alert(site, {
           title: `${siteTag(site)} - ${this.who(settings)} replied`,
@@ -282,6 +287,11 @@ export class ChatRoom extends DurableObject<Env> {
       }
       return;
     }
+    await this.respond(id, text, settings, site);
+  }
+
+  /** The AI's reply to the visitor's message, within the cost limits. */
+  private async respond(id: string, text: string, settings: Settings, site: SiteConfig): Promise<void> {
     if (this.st.mode === "form") return;
     if (!settings.aiEnabled) return this.toForm("ai_off", settings);
 
@@ -349,7 +359,7 @@ export class ChatRoom extends DurableObject<Env> {
     const deadline = Date.now() + settings.turnTimeoutSec * 1000;
     this.st.turnDeadline = deadline + 30_000;
     await this.save();
-    await this.ctx.storage.setAlarm(this.st.turnDeadline);
+    await this.scheduleAlarm();
     this.broadcastStatus(settings);
 
     const failures: string[] = [];
@@ -470,7 +480,7 @@ export class ChatRoom extends DurableObject<Env> {
     this.st.turnQuestion = undefined;
     this.st.recoveries = 0;
     await this.save();
-    await this.ctx.storage.deleteAlarm();
+    await this.scheduleAlarm();
     this.broadcastStatus(settings);
   }
 
@@ -492,7 +502,7 @@ export class ChatRoom extends DurableObject<Env> {
       const deadline = Date.now() + settings.turnTimeoutSec * 1000;
       this.st.turnDeadline = deadline + 30_000;
       await this.save();
-      await this.ctx.storage.setAlarm(this.st.turnDeadline);
+      await this.scheduleAlarm();
       this.broadcastStatus(settings);
       await this.interrupted(site, tier, question, trigger);
       try {
@@ -760,17 +770,46 @@ export class ChatRoom extends DurableObject<Env> {
       }
       this.add({ id: msg.id, role: "owner", text, meta: { via: "inbox", emailed } });
       this.st.handBack.push(`Owner: ${text}`);
+      this.st.handBackAt = undefined;
       this.st.wantsOwner = false;
       await db.markEnquiriesReplied(this.env.DB, this.st.chatId);
     }
     if (msg.t === "owner_hand_back" && this.st.mode === "owner") {
       this.st.mode = "ai";
       this.st.ownerJoined = false;
+      this.st.handBackAt = undefined;
       this.add({ id: newId("m"), role: "system", text: `${cap(site.ownerName)} has left the chat. You're chatting with the AI assistant.` });
     }
     await this.save();
+    await this.scheduleAlarm();
     this.index({ mode: this.st.mode, wants_owner: this.st.wantsOwner ? 1 : 0, unread: 0 });
     this.broadcastStatus(settings);
+  }
+
+  /** Gives a taken-over chat back to the AI, which then answers the visitor's messages since the owner's last reply. */
+  private async autoHandBack(why: "quiet" | "away", settings: Settings, site: SiteConfig): Promise<void> {
+    if (this.st.mode !== "owner") return;
+    const owner = cap(site.ownerName);
+    this.st.mode = "ai";
+    this.st.ownerJoined = false;
+    this.st.handBackAt = undefined;
+    const reason = why === "away" ? `handed back automatically: ${owner} is away` : `handed back automatically: no reply for ${settings.handBackAfterMin} min`;
+    this.add({ id: newId("m"), role: "system", text: `${owner} stepped away. You're chatting with the AI assistant.`, meta: { reason } });
+    const lastOwner = this.st.handBack.map((l) => l.startsWith("Owner: ")).lastIndexOf(true);
+    const waiting = this.st.handBack.slice(lastOwner + 1).map((l) => l.replace(/^Visitor: /, ""));
+    this.st.handBack = this.st.handBack.slice(0, lastOwner + 1);
+    await this.save();
+    await this.scheduleAlarm();
+    this.index({ mode: "ai" });
+    this.broadcastStatus(settings);
+    if (waiting.length) await this.respond(newId("m"), waiting.join("\n\n"), settings, site);
+  }
+
+  /** One alarm serves both the answer deadline and the hand-back timer: the sooner one still ahead. */
+  private async scheduleAlarm(): Promise<void> {
+    const next = [this.st.turnDeadline, this.st.handBackAt].filter((t): t is number => !!t && t > Date.now());
+    if (next.length) await this.ctx.storage.setAlarm(Math.min(...next));
+    else await this.ctx.storage.deleteAlarm();
   }
 
   // ---------- forms and email ----------
@@ -900,13 +939,19 @@ export class ChatRoom extends DurableObject<Env> {
   }
 
   override async alarm(): Promise<void> {
-    // Fires only when an answer outlived its deadline: the object was cut off or reset mid-answer.
-    if (!this.st?.turnDeadline) return;
-    if (this.busy && Date.now() - this.lastTouch < 60_000) return;
-    // Still "busy" with no sign of life for a minute: the code running the answer is gone.
-    this.busy = false;
-    this.recovering = false;
-    await this.recover("alarm");
+    if (!this.st) return;
+    if (this.st.handBackAt && Date.now() >= this.st.handBackAt - 1000) {
+      await this.autoHandBack("quiet", await db.getSettings(this.env.DB), await this.site());
+      return;
+    }
+    // Otherwise an answer outlived its deadline: the object was cut off or reset mid-answer.
+    if (this.st.turnDeadline && !(this.busy && Date.now() - this.lastTouch < 60_000)) {
+      // Still "busy" with no sign of life for a minute: the code running the answer is gone.
+      this.busy = false;
+      this.recovering = false;
+      await this.recover("alarm");
+    }
+    if (this.st.handBackAt) await this.scheduleAlarm();
   }
 
   // ---------- helpers ----------

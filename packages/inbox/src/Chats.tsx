@@ -300,7 +300,7 @@ function ChatView({ id, siteName, labelStyle }: { id: string; siteName: (k: stri
           <div ref={bottom} />
         </div>
 
-        <Reply status={status} connected={connected} hasEmail={!!chat.email} onSend={(text, email) => sock.current?.send({ t: "owner_send", id: newId("m"), text, email })} />
+        <Reply key={chat.id} status={status} connected={connected} hasEmail={!!(chat.email || status?.visitorEmail)} visitorOnline={presence.visitorOnline} onSend={(text, email) => sock.current?.send({ t: "owner_send", id: newId("m"), text, email })} />
       </div>
 
       <aside className="hidden w-72 shrink-0 space-y-4 overflow-y-auto border-l border-border p-4 text-sm xl:block [html[data-d-layout=two]_&]:hidden">
@@ -322,7 +322,13 @@ function Detail({ icon: Icon, label, children }: { icon: typeof Globe; label: st
 }
 
 function Bubble({ m }: { m: ChatMessage }) {
-  if (m.role === "system") return <p className="text-center text-xs text-muted-fg">{m.text}</p>;
+  if (m.role === "system")
+    return (
+      <p className="text-center text-xs text-muted-fg">
+        {m.text}
+        {m.meta?.reason && ` (${m.meta.reason})`}
+      </p>
+    );
   const mine = m.role === "owner";
   const visitor = m.role === "visitor";
   return (
@@ -345,9 +351,14 @@ function Bubble({ m }: { m: ChatMessage }) {
   );
 }
 
-function Reply({ status, connected, hasEmail, onSend }: { status: ChatStatus | null; connected: boolean; hasEmail: boolean; onSend: (text: string, email: boolean) => void }) {
+function Reply({ status, connected, hasEmail, visitorOnline, onSend }: { status: ChatStatus | null; connected: boolean; hasEmail: boolean; visitorOnline: boolean; onSend: (text: string, email: boolean) => void }) {
   const [text, setText] = useState("");
-  const [email, setEmail] = useState(true);
+  // Emailing follows the visitor: on while they're away from the chat, off while they're in it, until the owner picks.
+  const [email, setEmail] = useState(!visitorOnline);
+  const [picked, setPicked] = useState(false);
+  useEffect(() => {
+    if (!picked) setEmail(!visitorOnline);
+  }, [visitorOnline, picked]);
   const joined = status?.mode === "owner";
   const send = () => {
     const t = text.trim();
@@ -388,7 +399,15 @@ function Reply({ status, connected, hasEmail, onSend }: { status: ChatStatus | n
       </div>
       <div className="mt-1.5 flex items-center justify-between gap-2">
         <label className={`flex items-center gap-2 text-xs ${hasEmail ? "" : "text-muted-fg"}`} title={hasEmail ? "" : "The visitor hasn't given an email address"}>
-          <input type="checkbox" checked={email && hasEmail} disabled={!hasEmail} onChange={(e) => setEmail(e.target.checked)} />
+          <input
+            type="checkbox"
+            checked={email && hasEmail}
+            disabled={!hasEmail}
+            onChange={(e) => {
+              setPicked(true);
+              setEmail(e.target.checked);
+            }}
+          />
           Also email this reply
         </label>
         <span className="text-xs text-muted-fg">{!connected ? "Connecting…" : joined ? "" : <span className="hidden md:inline">Sending takes over from the AI</span>}</span>

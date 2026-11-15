@@ -22,6 +22,10 @@ export interface Settings {
   presence: Presence;
   /** In "auto": away after this many minutes without activity on any device with the inbox open. */
   awayAfterMin: number;
+  /** A chat the owner took over goes back to the AI when a visitor message waits this long without an owner reply; 0 = never. */
+  handBackAfterMin: number;
+  /** A chat the owner took over goes back to the AI when the visitor writes while the owner shows as away. */
+  handBackWhenAway: boolean;
   /** true = real word-by-word deltas from Omnara; false = finished answers only. */
   streaming: boolean;
   /** Streaming only: send the words in one message per this many ms; 0 sends each piece as it arrives. */
@@ -55,6 +59,8 @@ export const DEFAULT_SETTINGS: Settings = {
   aiEnabled: true,
   presence: "auto",
   awayAfterMin: 10,
+  handBackAfterMin: 3,
+  handBackWhenAway: true,
   streaming: true,
   deltaBatchMs: 0,
   ladder: [
@@ -162,9 +168,12 @@ export interface PublicSiteConfig {
   noticeText: string;
   theme: ThemeMap;
   ui: Partial<WidgetUi>;
-  proactive: { enabled: boolean; delaySec: number; text: string };
+  /** The greeting bubble; `repeat` = how often it may show: once per tab session (default), once per day, or on every page load. */
+  proactive: { enabled: boolean; delaySec: number; text: string; repeat?: GreetingRepeat };
   turnstileSiteKey?: string;
 }
+
+export type GreetingRepeat = "session" | "day" | "page";
 
 /** Full site config stored on the server (pushed by kb-sync). */
 export interface SiteConfig extends PublicSiteConfig {

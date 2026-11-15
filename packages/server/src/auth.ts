@@ -146,7 +146,8 @@ export async function verifyAccess(env: Env, req: Request): Promise<string | nul
     const claims = JSON.parse(new TextDecoder().decode(fromB64url(p))) as { aud: string | string[]; exp: number; email?: string };
     const aud = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
     if (!aud.includes(env.ACCESS_AUD) || claims.exp * 1000 < Date.now()) return null;
-    return claims.email ?? "owner";
+    // A person signs in with an email; a service token (scripts) has none.
+    return claims.email ?? "service";
   } catch {
     return null;
   }

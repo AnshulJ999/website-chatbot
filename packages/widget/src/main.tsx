@@ -2,6 +2,7 @@ import { render } from "preact";
 import { DEFAULT_UI, type PublicSiteConfig, type SessionRequest, type ThemeMap, type WidgetUi } from "@website-chatbot/shared";
 import { App } from "./App";
 import { ChatClient } from "./client";
+import { greetingDue, greetingShown } from "./greeting";
 import { live, patch, site, ui } from "./store";
 import css from "./styles.css?inline";
 import { applyTheme } from "./theme";
@@ -65,28 +66,19 @@ async function loadSite(server: string, key: string): Promise<PublicSiteConfig |
 }
 
 /**
- * The bubble above the closed chat, once per browser session: a reply from the owner the visitor hasn't
- * seen (always), else "welcome back" for a visitor with a saved chat, else the site's greeting.
+ * The bubble above the closed chat: a reply from the owner the visitor hasn't seen (always), else, as often
+ * as the site's `proactive.repeat` allows, "welcome back" for a visitor with a saved chat or the site's greeting.
  */
 function scheduleBubble(s: PublicSiteConfig, client: ChatClient): void {
-  let shown = false;
-  try {
-    shown = !!sessionStorage.getItem("wcb:bubble");
-  } catch {
-    // show it anyway
-  }
+  const due = greetingDue(s.proactive.repeat);
   setTimeout(async () => {
     if (live.value.open) return;
     let text = "";
     if (await client.ownerReplied()) text = `${s.ownerName.charAt(0).toUpperCase()}${s.ownerName.slice(1)} replied to your message`;
-    else if (!shown && s.proactive.enabled) text = live.value.messages.length ? "Welcome back! Pick up where you left off?" : s.proactive.text;
+    else if (due && s.proactive.enabled) text = live.value.messages.length ? "Welcome back! Pick up where you left off?" : s.proactive.text;
     if (!text || live.value.open) return;
     patch({ bubble: true, bubbleText: text });
-    try {
-      sessionStorage.setItem("wcb:bubble", "1");
-    } catch {
-      // fine
-    }
+    greetingShown();
   }, s.proactive.delaySec * 1000);
 }
 

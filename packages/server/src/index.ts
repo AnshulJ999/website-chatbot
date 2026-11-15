@@ -270,8 +270,11 @@ async function summary(env: Env) {
 // ---------- owner API (behind Cloudflare Access) ----------
 
 app.use("/admin/api/*", async (c, next) => {
-  if (isDev(c.env) || (await verifyAccess(c.env, c.req.raw))) return next();
-  return c.text("unauthorized", 401);
+  const who = isDev(c.env) ? "dev" : await verifyAccess(c.env, c.req.raw);
+  if (!who) return c.text("unauthorized", 401);
+  // Service tokens may only read: no changes and no live chat sockets.
+  if (who === "service" && (c.req.method !== "GET" || c.req.header("Upgrade"))) return c.text("read only", 403);
+  return next();
 });
 
 app.get("/admin/api/overview", async (c) => {
@@ -369,7 +372,7 @@ const EFFORTS = ["max", "xhigh", "high", "medium", "low", "none", ""];
 function sanitizeSettings(p: Partial<Settings>): Partial<Settings> {
   const out: Partial<Settings> = {};
   const num = (v: unknown, min: number, max: number) => (typeof v === "number" && Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : undefined);
-  for (const k of ["aiEnabled", "streaming", "alertOnNewChat", "countTestChats"] as const) if (typeof p[k] === "boolean") out[k] = p[k];
+  for (const k of ["aiEnabled", "streaming", "alertOnNewChat", "countTestChats", "handBackWhenAway"] as const) if (typeof p[k] === "boolean") out[k] = p[k];
   if (p.visitorLabel === "number" || p.visitorLabel === "code" || p.visitorLabel === "name") out.visitorLabel = p.visitorLabel;
   if (p.presence === "auto" || p.presence === "available" || p.presence === "away") out.presence = p.presence;
   const ranges: [keyof Settings, number, number][] = [
@@ -382,6 +385,7 @@ function sanitizeSettings(p: Partial<Settings>): Partial<Settings> {
     ["turnTimeoutSec", 10, 900],
     ["stillWorkingSec", 1, 120],
     ["awayAfterMin", 1, 240],
+    ["handBackAfterMin", 0, 240],
     ["deltaBatchMs", 0, 1000],
     ["cooldownAfterFailures", 1, 100],
     ["cooldownMinutes", 1, 1440],
@@ -467,8 +471,10 @@ function htmlToText(html: string): string {
 function stripQuoted(text: string): string {
   const lines = text.replace(/\r\n/g, "\n").split("\n");
   const out: string[] = [];
-  for (const line of lines) {
-    if (/^On .+wrote:\s*$/.test(line) || /^-{2,}\s*Original Message/i.test(line) || /^From: /.test(line) || line.trim() === "---") break;
+  for (const [i, line] of lines.entries()) {
+    // Gmail wraps a long "On <date> <sender> wrote:" header over two or three lines.
+    if (/^On /.test(line) && lines.slice(i, i + 3).some((l) => /wrote:\s*$/.test(l))) break;
+    if (/^-{2,}\s*Original Message/i.test(line) || /^From: /.test(line) || line.trim() === "---") break;
     if (line.startsWith(">")) continue;
     out.push(line);
   }
