@@ -6,10 +6,8 @@ export const TALK_WORDING: Record<string, string> = {
 };
 
 export const CREDIT_WORDING: Record<string, string> = {
-  open: "Open-source chat",
-  isopen: "This chat is open source",
-  omnara: "Built on Omnara",
-  anshul: "Built by Anshul",
+  get: "Get this chatbot",
+  about: "About this chatbot",
 };
 
 export const OWNER_NAMES: Record<string, string> = {

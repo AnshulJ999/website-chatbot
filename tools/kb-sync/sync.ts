@@ -742,6 +742,7 @@ async function main(): Promise<void> {
 
   if (!flag("--no-push")) {
     const site = { ...cfg.site, instruction, siteBrief: brief.text };
+    if (!cfg.site.origins?.length) warnings.push("site.origins is empty: the widget is refused on every page until it lists the site's addresses");
     if (!server) throw new Error("Missing CHATBOT_SERVER (or PUBLIC_URL)");
     if (dryRun) {
       console.log(`would push site config "${cfg.site.key}" to ${server} (site brief: ${brief.text.length} chars)`);

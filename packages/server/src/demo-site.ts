@@ -19,7 +19,7 @@ export const DEMO_SITE: SiteConfig = {
   theme: {},
   ui: {},
   proactive: { enabled: true, delaySec: 20, text: "Questions? I can help." },
-  credit: { text: "This chat is open source", url: "https://github.com/AnshulJ999/website-chatbot" },
+  credit: { text: "Get this chatbot", url: "https://github.com/AnshulJ999/website-chatbot" },
   origins: [],
   // The scripted brain needs no store; with the real brain, point this at a store you have synced.
   storeName: "website-chatbot-demo",

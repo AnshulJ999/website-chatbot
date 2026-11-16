@@ -35,8 +35,9 @@ export function greetingShown(): void {
 /** Opening the chat by itself suits a large screen only; on a phone it would cover the page. */
 export const canAutoOpen = () => matchMedia("(pointer: fine) and (min-width: 768px)").matches;
 
-/** At most once per visit, and not again the day the visitor closed it. */
-export function autoOpenDue(): boolean {
+/** At most once per visit, and not again the day the visitor closed it; every page load when `repeat` is "page" (testing). */
+export function autoOpenDue(repeat?: GreetingRepeat): boolean {
+  if (repeat === "page") return true;
   try {
     return !sessionStorage.getItem(OPENED) && localStorage.getItem(CLOSED) !== today();
   } catch {
@@ -67,7 +68,8 @@ export function countPage(): number {
 /** Opens the chat (welcome and starters, no connection yet) without taking focus from the page. */
 export function autoOpen(): void {
   if (live.value.open || live.value.messages.length) return;
-  patch({ open: true, bubble: false, autoOpened: true });
+  // loading: a saved chat whose messages aren't cached yet; they load once the visitor writes.
+  patch({ open: true, bubble: false, autoOpened: true, loading: false });
   try {
     sessionStorage.setItem(OPENED, "1");
   } catch {
@@ -82,7 +84,7 @@ export function autoOpen(): void {
  */
 export function watchAutoOpen(s: PublicSiteConfig, pages: number, requireActivity = true, start = Date.now()): () => void {
   const href = location.href;
-  const after = (s.proactive.openAfterSec ?? 45) * 1000;
+  const after = (s.proactive.openAfterSec ?? 30) * 1000;
   const timer = window.setInterval(() => {
     if (live.value.open || live.value.messages.length || Date.now() - start > 10 * 60_000) return window.clearInterval(timer);
     const active = !requireActivity || pages >= 2 || window.scrollY > 300 || location.href !== href;

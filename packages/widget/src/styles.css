@@ -809,9 +809,24 @@ textarea {
   margin: auto 0;
 }
 .more-starters {
-  align-self: flex-start;
-  margin-top: 2px;
-  font-size: 13px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted-fg);
+}
+.more-starters:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.more-starters .icon {
+  width: 15px;
+  height: 15px;
 }
 .talkbar-quiet {
   justify-content: flex-end;

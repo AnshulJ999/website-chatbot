@@ -74,17 +74,20 @@ async function loadSite(server: string, key: string): Promise<PublicSiteConfig |
 function scheduleBubble(s: PublicSiteConfig, client: ChatClient): void {
   const due = greetingDue(s.proactive.repeat);
   const pages = countPage();
-  // The "open" greeting opens the chat itself on large screens; phones get the bubble.
-  const opens = s.proactive.enabled && s.proactive.style === "open" && canAutoOpen();
+  // "both" and "open" open the chat itself on large screens; phones get the bubble.
+  const style = s.proactive.style ?? "bubble";
+  const opens = s.proactive.enabled && style !== "bubble" && canAutoOpen();
   setTimeout(async () => {
     if (live.value.open) return;
     let text = "";
+    const fresh = !live.value.messages.length;
     if (await client.ownerReplied()) text = `${s.ownerName.charAt(0).toUpperCase()}${s.ownerName.slice(1)} replied to your message`;
-    else if (opens && !live.value.messages.length) {
+    else {
       // Counted from page load.
-      if (autoOpenDue()) watchAutoOpen(s, pages, true, performance.timeOrigin);
-      return;
-    } else if (due && s.proactive.enabled) text = live.value.messages.length ? "Welcome back! Pick up where you left off?" : s.proactive.text;
+      if (opens && fresh && autoOpenDue(s.proactive.repeat)) watchAutoOpen(s, pages, true, performance.timeOrigin);
+      const bubble = !opens || style === "both" || !fresh;
+      if (bubble && due && s.proactive.enabled) text = fresh ? s.proactive.text : "Welcome back! Pick up where you left off?";
+    }
     if (!text || live.value.open) return;
     patch({ bubble: true, bubbleText: text });
     greetingShown();

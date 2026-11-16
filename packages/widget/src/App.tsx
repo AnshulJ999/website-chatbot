@@ -380,7 +380,7 @@ function Welcome({ client, site: s, v }: { client: ChatClient; site: PublicSiteC
   const count = Math.max(1, u.starters || 4);
   // "More questions" walks through the page's list in order, wrapping round at the end.
   const starters = all.length <= count ? all : Array.from({ length: count }, (_, i) => all[(offset + i) % all.length]!);
-  const layout = starters.length > 3 ? "list" : u.suggestions;
+  const layout = u.starterLayout;
   return (
     <div class="welcome">
       <div class="msg ai" dangerouslySetInnerHTML={{ __html: renderMarkdown(s.greeting) }} />
@@ -409,8 +409,8 @@ function Welcome({ client, site: s, v }: { client: ChatClient; site: PublicSiteC
             </button>
           ))}
           {u.moreStarters === "on" && all.length > count && (
-            <button class="link-btn more-starters" onClick={() => setOffset((o) => (o + count) % all.length)}>
-              More questions
+            <button class="more-starters" title="More questions" aria-label="More questions" onClick={() => setOffset((o) => (o + count) % all.length)}>
+              <Icon name="refresh" />
             </button>
           )}
         </div>
@@ -617,7 +617,8 @@ function Unreachable({ site: s, client }: { site: PublicSiteConfig; client: Chat
 function Composer({ client, v, talk }: { client: ChatClient; v: View; talk: preact.ComponentChildren }) {
   const [text, setText] = useState("");
   const ref = useRef<HTMLTextAreaElement>(null);
-  const busy = v.status.busy;
+  // Once the owner has joined, the visitor can write while the AI finishes its answer.
+  const busy = v.status.busy && v.status.mode === "ai";
 
   useLayoutEffect(() => {
     const el = ref.current;

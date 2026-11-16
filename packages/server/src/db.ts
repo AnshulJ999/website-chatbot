@@ -215,7 +215,8 @@ export async function listChats(
   if (q.filter === "wants") where.push("c.wants_owner = 1");
   if (q.filter === "email") where.push("v.email IS NOT NULL");
   if (q.before) {
-    where.push(`c.updated_at < ?${args.length + 1}`);
+    // Live chats all sit on the first page (they sort first), so older pages hold the rest.
+    where.push(`c.visitor_online = 0 AND c.updated_at < ?${args.length + 1}`);
     args.push(q.before);
   }
   const sql = `${SUMMARY_SQL} WHERE ${where.join(" AND ")} ORDER BY c.visitor_online DESC, c.updated_at DESC LIMIT ${Math.min(q.limit ?? 50, 200)}`;

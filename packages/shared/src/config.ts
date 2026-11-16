@@ -152,8 +152,10 @@ export interface WidgetUi {
   away: "status" | "link" | "menu";
   /** Streaming answers: shown as they arrive, or with unfinished formatting held back. */
   stream: "raw" | "tidy";
-  /** Starter questions shown at once; more than three show as a list. */
+  /** Starter questions shown at once. */
   starters: number;
+  /** Starter questions as chips in a row, or as a stacked list. */
+  starterLayout: "chips" | "list";
   /** "More questions" under the starters walks through the rest of the page's list. */
   moreStarters: "off" | "on";
   /** Where the credit line (site config `credit`) shows. */
@@ -168,12 +170,16 @@ export const DEFAULT_UI: WidgetUi = {
   talkPlacement: "bar",
   notice: "welcome",
   actions: "hover",
-  away: "status",
-  stream: "raw",
+  away: "menu",
+  stream: "tidy",
   starters: 4,
+  starterLayout: "chips",
   moreStarters: "off",
-  credit: "off",
+  credit: "menu",
 };
+
+/** The credit line a site gets unless it sets its own `credit` (or turns it off with `ui.credit`). */
+export const DEFAULT_CREDIT = { text: "Get this chatbot", url: "https://github.com/AnshulJ999/website-chatbot" };
 
 /** What the widget may know about a site. */
 export interface PublicSiteConfig {
@@ -193,12 +199,12 @@ export interface PublicSiteConfig {
   theme: ThemeMap;
   ui: Partial<WidgetUi>;
   /**
-   * The greeting: a bubble above the closed chat (`delaySec` after load, as often as `repeat` allows), or with
-   * `style: "open"` the chat itself opens after `openAfterSec` once the visitor has scrolled or seen a second page
-   * (desktop only; phones get the bubble).
+   * The greeting: a bubble above the closed chat (`delaySec` after load, as often as `repeat` allows). With
+   * `style: "both"` the chat also opens by itself after `openAfterSec` once the visitor has scrolled or seen a second
+   * page; `"open"` does that without the bubble. Opening is desktop only; phones get the bubble.
    */
-  proactive: { enabled: boolean; delaySec: number; text: string; repeat?: GreetingRepeat; style?: "bubble" | "open"; openAfterSec?: number };
-  /** A small credit line ("This chat is open source") with a link; where it shows is `ui.credit`. */
+  proactive: { enabled: boolean; delaySec: number; text: string; repeat?: GreetingRepeat; style?: "bubble" | "both" | "open"; openAfterSec?: number };
+  /** A small credit link; where it shows is `ui.credit`. Default: DEFAULT_CREDIT. */
   credit?: { text: string; url: string };
   turnstileSiteKey?: string;
 }
@@ -253,7 +259,7 @@ export function toPublic(site: SiteConfig): PublicSiteConfig {
     theme: site.theme,
     ui: site.ui,
     proactive: site.proactive,
-    credit: site.credit,
+    credit: site.credit ?? DEFAULT_CREDIT,
     turnstileSiteKey: site.turnstileSiteKey,
   };
 }

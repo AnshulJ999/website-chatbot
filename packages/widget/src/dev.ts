@@ -40,6 +40,7 @@ export function initDev(_host: HTMLElement, opts: WidgetOptions, client: ChatCli
       away: pick("away", v("away")),
       stream: pick("stream", v("stream")),
       starters: Number(v("starters")) || pick("starters", undefined),
+      starterLayout: pick("starterLayout", v("starterlayout")),
       moreStarters: pick("moreStarters", v("morestarters")),
       credit: pick("credit", v("credit")),
     };
@@ -53,11 +54,11 @@ export function initDev(_host: HTMLElement, opts: WidgetOptions, client: ChatCli
       const greetOn = v("greeting") ? v("greeting") === "on" : base.proactive.enabled;
       const delaySec = Number(v("greetdelay")) || base.proactive.delaySec;
       const repeat = (v("greetrepeat") ?? base.proactive.repeat ?? "session") as GreetingRepeat;
-      const style = (v("greetstyle") ?? base.proactive.style ?? "bubble") as "bubble" | "open";
-      const openAfterSec = Number(v("openafter")) || base.proactive.openAfterSec || 45;
+      const style = (v("greetstyle") ?? base.proactive.style ?? "bubble") as "bubble" | "both" | "open";
+      const openAfterSec = Number(v("openafter")) || base.proactive.openAfterSec || 30;
       const proactive = { ...base.proactive, enabled: greetOn, delaySec, repeat, style, openAfterSec, text: base.proactive.text || `Questions about ${site.value.name}? Ask here.` };
       const creditword = v("creditword");
-      const creditText = (creditword && CREDIT_WORDING[creditword]) || base.credit?.text || CREDIT_WORDING.isopen!;
+      const creditText = (creditword && CREDIT_WORDING[creditword]) || base.credit?.text || CREDIT_WORDING.get!;
       const credit = { text: creditText, url: base.credit?.url || PROJECT_URL };
       const next = { ...site.value, talkLabel, ownerName: ownerName || base.ownerName, proactive, credit };
       const changed = (x: PublicSiteConfig) => JSON.stringify([x.talkLabel, x.ownerName, x.proactive, x.credit]);
@@ -73,10 +74,10 @@ export function initDev(_host: HTMLElement, opts: WidgetOptions, client: ChatCli
         stopAutoOpen = undefined;
         if (!greetOn) patch({ bubble: false });
         else if (!live.value.open && !live.value.messages.length) {
-          // The Playground has nothing to scroll, so the "open" greeting waits for time only there.
-          if (style === "open" && canAutoOpen()) {
-            if (autoOpenDue()) stopAutoOpen = watchAutoOpen(next, 1, !__WCB_PLAYGROUND__);
-          } else if (greetingDue(repeat)) {
+          // The Playground has nothing to scroll, so opening by itself waits for time only there.
+          const opens = style !== "bubble" && canAutoOpen();
+          if (opens && autoOpenDue(repeat)) stopAutoOpen = watchAutoOpen(next, 1, !__WCB_PLAYGROUND__);
+          if ((!opens || style === "both") && greetingDue(repeat)) {
             bubbleTimer = window.setTimeout(() => {
               patch({ bubble: true });
               greetingShown();

@@ -2,6 +2,7 @@ import { Archive, ArchiveRestore, ArrowLeft, Bot, Check, Globe, Hand, Info, Mail
 import { useEffect, useMemo, useRef, useState } from "react";
 import { newId, renderMarkdown, visitorLabel, type ChatMessage, type ChatStatus, type ChatSummary, type VisitorLabel } from "@website-chatbot/shared";
 import { ago, api, chatSocket, usd, type ChatDetail } from "./api";
+import { notify } from "./presence";
 import { Badge, Button, Empty, ErrorLine } from "./ui";
 
 /** Chats per page, as the server sends them. */
@@ -48,7 +49,9 @@ export function Chats({ selected, sites, event, labelStyle }: { selected?: strin
     if (!chats?.length) return;
     setLoadingMore(true);
     try {
-      const older = await api.chats(filter, site, Math.min(...chats.map((c) => c.updatedAt)));
+      // Live chats sort first, so the cursor is the oldest chat that isn't live.
+      const offline = chats.filter((c) => !c.visitorOnline);
+      const older = await api.chats(filter, site, Math.min(...(offline.length ? offline : chats).map((c) => c.updatedAt)));
       setChats((list) => [...(list ?? []), ...older.filter((c) => !list?.some((x) => x.id === c.id))]);
       setMore(older.length >= PAGE);
     } catch (e) {
@@ -177,7 +180,6 @@ function ChatView({ id, siteName, labelStyle }: { id: string; siteName: (k: stri
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState(false);
-  const [done, setDone] = useState(false);
   const sock = useRef<ReturnType<typeof chatSocket> | null>(null);
   const bottom = useRef<HTMLDivElement>(null);
   const atBottom = useRef(true);
@@ -198,7 +200,11 @@ function ChatView({ id, siteName, labelStyle }: { id: string; siteName: (k: stri
         if (m.t === "history") {
           setMessages((l) => merge(l, m.messages));
           setStatus(m.status);
-        } else if (m.t === "message") setMessages((l) => merge(l, [m.message]));
+        } else if (m.t === "message") {
+          setMessages((l) => merge(l, [m.message]));
+          // This open chat keeps the visitor's messages from counting as unread, so it raises the notification itself.
+          if (m.message.role === "visitor" && document.hidden) notify("New message in your chat", m.message.text, () => {});
+        }
         else if (m.t === "update") setMessages((l) => l.map((x) => (x.id === m.message.id ? m.message : x)));
         else if (m.t === "status") setStatus(m.status);
         else if (m.t === "presence") setPresence({ visitorOnline: m.visitorOnline, page: m.page });
@@ -289,12 +295,9 @@ function ChatView({ id, siteName, labelStyle }: { id: string; siteName: (k: stri
               {presence.visitorOnline ? <span className="text-ok">On the site{presence.page ? ` · ${presence.page}` : ""}</span> : "Left the site"} · {siteName(chat.site)}
             </p>
           </div>
-          {(status?.wantsOwner || (chat.wantsOwner && !done)) && (
+          {(status ? status.wantsOwner : chat.wantsOwner) && (
             <Button
-              onClick={() => {
-                sock.current?.send({ t: "owner_done" });
-                setDone(true);
-              }}
+              onClick={() => sock.current?.send({ t: "owner_done" })}
               disabled={!connected} title={'Clears "Waiting for you" without replying'} className="px-2 md:px-3">
               <Check size={15} /> <span className="hidden sm:inline">Done</span>
             </Button>

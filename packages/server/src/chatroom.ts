@@ -234,8 +234,15 @@ export class ChatRoom extends DurableObject<Env> {
         return this.onContact(ws, msg.name, msg.email, msg.message, settings, site);
       case "email_transcript":
         return this.onEmailTranscript(ws, msg.email, settings, site);
-      case "retry_ai":
-        return this.leaveFormIfClear(settings);
+      case "retry_ai": {
+        // After a failed answer: back to the chat, and the AI tries the visitor's last question again.
+        const failed = this.st.mode === "form" && this.st.reason === "ai_unavailable";
+        await this.leaveFormIfClear(settings);
+        if (!failed || this.st.mode !== "ai" || this.busy) return;
+        const last = this.rows("WHERE role = 'visitor' ORDER BY seq DESC LIMIT 1")[0];
+        if (last) await this.respond(last.id, last.text, settings, site);
+        return;
+      }
       case "page":
         if (msg.url !== this.st.page) {
           this.st.page = msg.url.slice(0, 500);
@@ -252,7 +259,8 @@ export class ChatRoom extends DurableObject<Env> {
   private async onVisitorSend(ws: WebSocket, id: string, raw: string, settings: Settings, site: SiteConfig): Promise<void> {
     const text = raw.trim().slice(0, settings.maxMessageChars);
     if (!text) return;
-    if (this.busy) return this.sendTo(ws, { t: "error", code: "busy", text: "Please wait for the answer to finish." });
+    // Once the owner has joined, the AI's last answer may still be finishing; the visitor can write meanwhile.
+    if (this.busy && this.st.mode === "ai") return this.sendTo(ws, { t: "error", code: "busy", text: "Please wait for the answer to finish." });
     if (this.message(id)) return; // resent after a reconnect
 
     const count = await db.countVisitorMessage(this.env.DB, this.st.visitorId);
@@ -936,7 +944,10 @@ export class ChatRoom extends DurableObject<Env> {
     if (!this.st.visitorEmail) this.st.visitorEmail = address;
     await this.save();
     this.index({ mode: this.st.mode, wants_owner: 1 });
-    this.broadcastStatus(await db.getSettings(this.env.DB));
+    const settings = await db.getSettings(this.env.DB);
+    this.broadcastStatus(settings);
+    // One alert per cool-down, like "wants you"; every reply still lands in the chat.
+    if (!(await db.alertDue(this.env.DB, `mail:${this.st.chatId}`, settings.wantsYouAlertEveryMin * 60_000))) return;
     this.alert(site, {
       title: `${siteTag(site)} - Email reply from ${this.st.visitorName || address}`,
       lines: [`💬 ${quote(text, 300)}`, `✉️ ${address}`],

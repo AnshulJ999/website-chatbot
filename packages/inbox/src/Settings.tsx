@@ -104,10 +104,30 @@ export function Settings({ overview, onSave }: { overview: Overview; onSave: (p:
 
         <Card title="Limits and timing">
           <div className="grid gap-4 sm:grid-cols-2">
-            <Num label="Messages per visitor per day" value={draft.perVisitorDailyMessages} onChange={(v) => set("perVisitorDailyMessages", v)} />
-            <Num label="Messages a visitor can leave per day (including chats they email themselves)" value={draft.visitorMessagesPerDay} onChange={(v) => set("visitorMessagesPerDay", v)} />
-            <Num label="Emails to visitors per day, all sites (confirmations and emailed chats)" value={draft.visitorEmailsPerDay} onChange={(v) => set("visitorEmailsPerDay", v)} />
-            <Num label={'"Wants you" alerts for one chat at most every (minutes)'} value={draft.wantsYouAlertEveryMin} onChange={(v) => set("wantsYouAlertEveryMin", v)} />
+            <Num
+              label="Chat messages per visitor per day"
+              hint="How many times one visitor can write to the assistant in a day. After that, the chat shows your contact options."
+              value={draft.perVisitorDailyMessages}
+              onChange={(v) => set("perVisitorDailyMessages", v)}
+            />
+            <Num
+              label="Messages left for you, per visitor per day"
+              hint="The contact form, messages the assistant saves for you, and chats a visitor emails to themselves."
+              value={draft.visitorMessagesPerDay}
+              onChange={(v) => set("visitorMessagesPerDay", v)}
+            />
+            <Num
+              label="Emails to visitors per day, all sites"
+              hint="Confirmations and emailed chats. After that, messages still reach you; only the visitor's copy is skipped."
+              value={draft.visitorEmailsPerDay}
+              onChange={(v) => set("visitorEmailsPerDay", v)}
+            />
+            <Num
+              label="Minutes between phone alerts for one chat"
+              hint={'For "wants you" alerts and email replies from the same chat.'}
+              value={draft.wantsYouAlertEveryMin}
+              onChange={(v) => set("wantsYouAlertEveryMin", v)}
+            />
             <Num label="Longest visitor message (characters)" value={draft.maxMessageChars} step={100} onChange={(v) => set("maxMessageChars", v)} />
             <Num label="Try the next model after this much total silence (seconds)" value={draft.stallTimeoutSec} onChange={(v) => set("stallTimeoutSec", v)} />
             <Num label="Longest one model may take on an answer (seconds)" value={draft.modelTimeoutSec} onChange={(v) => set("modelTimeoutSec", v)} />
@@ -213,11 +233,12 @@ function PromptViewer({ sites }: { sites: { key: string; name: string }[] }) {
   );
 }
 
-function Num({ label, value, step = 1, onChange }: { label: string; value: number; step?: number; onChange: (v: number) => void }) {
+function Num({ label, hint, value, step = 1, onChange }: { label: string; hint?: string; value: number; step?: number; onChange: (v: number) => void }) {
   return (
     <label className="flex flex-col gap-1 text-sm">
       {label}
       <input type="number" min={0} step={step} value={value} onChange={(e) => onChange(Number(e.target.value))} className="rounded-md border border-border bg-panel px-2 py-1.5 tabular" />
+      {hint && <span className="text-xs text-muted-fg">{hint}</span>}
     </label>
   );
 }

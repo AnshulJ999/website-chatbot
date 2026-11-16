@@ -2,7 +2,7 @@
 
 An AI chat widget for your website that answers from your own pages, hands visitors to you when they need a person, and never leaves them at a dead end. One script tag on any site. The server runs on Cloudflare's free plan; the AI runs on [Omnara](https://omnara.com) agents.
 
-<!-- Screenshots and a short clip go here: docs/images/widget.png, docs/images/inbox.png, docs/images/chat.gif -->
+![The chat on kopialens.com: a visitor asks whether KopiaLens is free, and the assistant answers from the site's pricing page with follow-up suggestions](docs/images/widget.png)
 
 ## Live demos
 
@@ -138,8 +138,8 @@ node tools/kb-sync/sync.ts ../my-site/chatbot/chatbot.config.json --env packages
 
 - **Theme:** map the widget's colours, radius and font to your site's CSS variables in the site config (`theme`), for example `"accent": "var(--color-primary)"`. Light/dark and theme switches follow automatically.
 - **Layout:** launcher style, corner, panel size, suggestion style, how many starter questions show, where "Talk to a person" sits and what it shows while you're away are per-site settings (`ui`).
-- **Greeting:** a small bubble, or the chat opening by itself once a visitor has spent a while on the site (`proactive`).
-- **Credit line (optional):** `credit` holds a short text and link, shown in the menu or under the message box (`ui.credit`). `aboutChat` is what the AI may say when asked how the chat was built; leave it empty and it says nothing about it.
+- **Greeting:** a small bubble, and optionally the chat opening by itself once a visitor has spent a while on the site (`proactive`).
+- **Credit link:** a "Get this chatbot" link to this project sits in the chat's menu by default. Change it with `credit` (text and link), move it under the message box, or turn it off with `"ui": { "credit": "off" }`. `aboutChat` is what the AI may say when asked how the chat was built; leave it empty and it says nothing about it.
 - **From your own code:** `window.WebsiteChatbot.open()`, `.close()` and `.newChat()`.
 
 ## Settings

@@ -253,7 +253,7 @@ app.get("/api/summary", async (c) => {
 
 async function summary(env: Env) {
   const day = Date.now() - 86_400_000;
-  const [settings, spend, stats, enquiries, chats, failedAnswers, failedAttempts, cutOffAnswers, failedAlerts, failedMails, answers24h] = await Promise.all([
+  const [settings, spend, stats, enquiries, chats, failedAnswers, failedAttempts, cutOffAnswers, failedAlerts, failedMails, failedInbound, cappedMails, answers24h] = await Promise.all([
     db.getSettings(env.DB),
     db.spendToday(env.DB),
     db.getSettings(env.DB).then((s) => db.stats(env.DB, 7, s.countTestChats)),
@@ -264,13 +264,15 @@ async function summary(env: Env) {
     db.countIncidents(env.DB, "turn_interrupted", day),
     db.countIncidents(env.DB, "alert_failed", day),
     db.countIncidents(env.DB, "mail_failed", day),
+    db.countIncidents(env.DB, "inbound_failed", day),
+    db.countIncidents(env.DB, "mail_capped", day),
     db.getSettings(env.DB).then((s) => db.answerStats(env.DB, day, s.countTestChats)),
   ]);
   return {
     aiEnabled: settings.aiEnabled,
     presence: settings.presence,
     ownerOnline: await ownerOnline(env),
-    problemsLast24h: { failedAnswers, failedAttempts, cutOffAnswers, failedAlerts, failedMails },
+    problemsLast24h: { failedAnswers, failedAttempts, cutOffAnswers, failedAlerts, failedMails, failedInbound, cappedMails },
     answersLast24h: answers24h,
     spendTodayUsd: spend,
     dailyBudgetUsd: settings.dailyBudgetUsd,
