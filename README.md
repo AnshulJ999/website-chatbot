@@ -1,21 +1,21 @@
 # Website Chatbot
 
-An AI chat widget for your website that answers from your own pages, hands visitors to you when they need a person, and never leaves them at a dead end. One script tag on any site. The server runs on Cloudflare's free plan; the AI runs on [Omnara](https://omnara.com) agents.
+An AI chat widget for your website that answers from your own pages, hands visitors to you when they need a person, and never leaves them hanging. One script tag on any site. The server runs on Cloudflare's free plan; the AI runs on [Omnara](https://omnara.com) agents.
 
 ![The chat on kopialens.com: a visitor asks whether KopiaLens is free, and the assistant answers from the site's pricing page with follow-up suggestions](docs/images/widget.png)
 
 ## Live demos
 
 - [kopialens.com](https://kopialens.com): product help for a backup app, answering from 50+ docs pages
-- [anshuljain.net](https://www.anshuljain.net): a portfolio assistant that answers questions about the owner's work
+- [anshuljain.net](https://www.anshuljain.net): a portfolio assistant that answers questions about the developer's work
 
 ## What it does
 
 **For visitors**
 
-- Answers from your site's own pages and docs, with links to the real pages. When it doesn't know, it says so.
+- Answers from your site's own pages and docs, with links to the real pages. When it doesn't know, it doesn't guess.
 - Starter questions per page, suggested follow-ups after each answer, and live progress ("Searching the knowledge base", "Reading Pricing").
-- Chats are kept: reload the page or come back later and the conversation is still there. Earlier chats are one tap away.
+- Chats are kept: reload the page or come back later and the conversation is still there. Earlier chats are one tap away in the menu.
 - Resizable, with a larger side-sheet view; works on phones.
 - "Talk to a person" at any time. If you're away, a short form takes their email instead.
 
@@ -33,27 +33,44 @@ An AI chat widget for your website that answers from your own pages, hands visit
 - If every model fails or a spending limit is reached, the chat becomes a "Get in touch" form, and goes back to the AI once the cause has passed.
 - If the server can't be reached, an open chat shows your contact options and keeps retrying. Visitors on their first visit see no chat button until it's back.
 - Answers interrupted by the platform are recovered and finished automatically.
-- Abuse limits: messages a visitor can leave per day, a daily cap on emails to visitors, and a cool-down on "wants you" alerts.
+- Adjustable abuse limits: how many messages a visitor can leave per day, a daily cap on emails to visitors, and a cool-down on "wants you" alerts.
 
 **Costs under control**
 
 - A per-chat limit, a daily budget, per-visitor message limits and a kill switch, all editable in the inbox.
-- Every number that affects cost or behaviour is a setting, not a constant.
+- Every number that affects cost or behaviour is a setting and quick to configure.
 
 ## How it works
 
-```
-Visitor's browser               Cloudflare Worker (free plan)                    Omnara
-widget.js  ── WebSocket ──>  ChatRoom Durable Object (one per chat)  ──>  one agent per chat
-                             D1: chats, visitors, messages left,           + read-only memory store
-                                 answer times, spend, incidents              (your site's pages)
-Your inbox (/admin) ─ WebSocket ─> Hub Durable Object (live updates, your status)
+```mermaid
+flowchart LR
+  subgraph Site["Your website"]
+    W["Chat widget<br/>one script tag"]
+  end
+  subgraph CF["Cloudflare (free plan)"]
+    R["ChatRoom<br/>one per chat"]
+    H["Hub<br/>live inbox, your status"]
+    D[("D1 database<br/>chats, messages left,<br/>spend, problems")]
+  end
+  subgraph OM["Omnara"]
+    A["AI agent<br/>one per chat"]
+    M[("Memory store<br/>your pages as Markdown")]
+  end
+  I["Your inbox<br/>/admin"]
+  S["kb-sync"]
+  W <-->|WebSocket| R
+  R <-->|question, streamed answer| A
+  A -->|looks things up| M
+  R --- D
+  I <-->|live updates| H
+  I -.->|join a chat, reply| R
+  S -->|copies your site| M
 ```
 
 - **Widget:** Preact inside a Shadow DOM, about 24 KB gzipped. It reads your site's CSS variables, so it follows your themes and light/dark mode without its styles leaking into your page.
 - **One Durable Object per chat:** holds the conversation, streams the answer, runs the model ladder and the time limits, and survives restarts.
 - **Omnara agent per chat:** the AI keeps the conversation's context and looks things up in a read-only memory store holding your pages as Markdown, each tagged with its public URL. It reads before it answers instead of guessing.
-- **kb-sync:** copies your site into that store: Markdown docs straight from your repo, plus your live pages through the sitemap.
+- **kb-sync (knowledge-base sync):** copies your site into that store: Markdown docs straight from your repo, plus your live pages through the sitemap.
 
 | Package | What |
 |---|---|
@@ -66,9 +83,9 @@ Your inbox (/admin) ─ WebSocket ─> Hub Durable Object (live updates, your st
 
 ## Built on Omnara
 
-[Omnara](https://omnara.com) runs the AI side. It's open source and can be self-hosted, anyone can sign up, and new accounts get free credits. The chatbot uses:
+[Omnara](https://omnara.com) runs the AI agents. It's [open source](https://github.com/omnara-ai/omnara) and can be self-hosted, anyone can sign up, and new accounts can get free credits. Its [docs](https://docs.omnara.com) cover projects, agents, memory stores and the API. The chatbot uses:
 
-- **An agent per chat** that keeps the whole conversation, so the server never resends the history.
+- **One agent per chat** that keeps the whole conversation, so the server never resends the history.
 - **A read-only memory store per site** holding the site's pages as Markdown. The agent looks things up before it answers.
 - **The model ladder:** any model your Omnara project can use, with reasoning effort per model. When one fails, the same agent switches to the next.
 - **Custom tools:** leave a message for the owner, call the owner into the chat, check the latest release.
@@ -76,8 +93,8 @@ Your inbox (/admin) ─ WebSocket ─> Hub Durable Object (live updates, your st
 
 ## What it costs
 
-- **AI:** you pay the model's own price. With DeepSeek V4.1 Flash a typical answer costs a fraction of a cent (about $0.002 to $0.007, depending on how much it reads). The ladder, effort per model and every limit are yours to set.
-- **Cloudflare:** the free plan covers it: Workers (100k requests a day per account), Durable Objects and D1. Streaming answers can use more CPU than the free plan's 10 ms per request; in practice they still complete, but a high-traffic site may want the paid plan.
+- **AI:** you pay the model's own price. With DeepSeek V4.1 Flash a typical answer costs a fraction of a cent (about $0.002 to $0.007, depending on how much it reads). The ladder, effort per model, and every limit are yours to set.
+- **Cloudflare:** the free plan covers it for small sites: Workers (100k requests a day per account), Durable Objects and D1. High-traffic sites may need a paid plan.
 - **Email (optional):** [Resend](https://resend.com)'s free plan (100 emails a day).
 - **Alerts (optional):** ntfy, free or self-hosted.
 
@@ -101,14 +118,20 @@ Open the Playground, keep Brain on **Scripted**, and chat. It starts on a built-
 
 It's not one-click yet: expect to spend some time on Cloudflare and Omnara setup.
 
-1. **Omnara:** create a project, grant it the models you want (for example DeepSeek V4.1 Flash and GPT-6 Luna) and create an organisation API key.
+**With an AI agent:** coding agents can do most of this for you. [AGENTS.md](AGENTS.md) gives them a map of the code. Paste this to yours:
+
+```
+Deploy https://github.com/AnshulJ999/website-chatbot for my website, following its README.md and AGENTS.md. Ask me before creating accounts, keys or DNS records, and tell me what you set up when you're done.
+```
+
+1. **Omnara** ([docs](https://docs.omnara.com)): create a project, grant it the models you want (for example DeepSeek V4.1 Flash and GPT-6 Luna) and create an organisation API key.
 2. **Cloudflare:**
-   - `npx wrangler d1 create website-chatbot`, then put its id and your values in `packages/server/wrangler.jsonc` (copied from `wrangler.example.jsonc`).
+   - `npx wrangler d1 create website-chatbot` ([D1](https://developers.cloudflare.com/d1/)), then put its id and your values in `packages/server/wrangler.jsonc` (copied from `wrangler.example.jsonc`).
    - `npm run db:migrate:remote -w @website-chatbot/server`
-   - Protect `/admin` and `/playground` with a Cloudflare Access application; set `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD`.
-   - Optional: a Turnstile widget for bot protection.
+   - Protect `/admin` and `/playground` with a [Cloudflare Access application](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/); set `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD`.
+   - Optional: a [Turnstile](https://developers.cloudflare.com/turnstile/get-started/) widget for bot protection.
 3. **Secrets:** put them in `packages/server/.deploy.vars` (git-ignored): `OMNARA_API_KEY`, `TOKEN_SECRET`, `API_TOKEN`, and optionally `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET`, `TURNSTILE_SECRET`, `NTFY_URL` / `NTFY_TOKEN` (or per-site names), `GITHUB_TOKEN`.
-4. **Deploy:** `npm run build`, then `npx wrangler deploy --secrets-file .deploy.vars` in `packages/server`, with a custom domain on the Worker.
+4. **Deploy:** `npm run build`, then `npx wrangler deploy --secrets-file .deploy.vars` in `packages/server`, with a [custom domain](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/) on the Worker.
 5. **Add your site** (below), then embed the widget.
 
 **Reply by email (optional).** Visitors' replies to the chatbot's emails go to `chat+<tag>@<replyDomain>` and land back in the chat. Use a subdomain with no other mail and pick one way in:
@@ -166,13 +189,12 @@ The chatbot saves each chat so the site owner can read and reply. With it, it sa
 - their device type and browser language
 - their name and email, only if they enter them
 
-IP addresses are used only for the bot check and aren't stored. A random visitor ID in the browser keeps their chats together. Add a line about the chat to your privacy page.
+IP addresses are used only for the bot check and aren't stored. A random visitor ID in the browser keeps their chats together. Add a line about the chatbot to your privacy page.
 
-## Limitations and roadmap
+## Current Limitations
 
 - Built for one owner per deployment, with several sites.
 - The AI answers from what's synced; re-run kb-sync after big site changes.
-- Not yet built: a fallback for when Omnara itself is down, and a helper that detects you're at your computer without the inbox open.
 
 ## Security
 
