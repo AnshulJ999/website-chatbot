@@ -2,6 +2,7 @@
   "name": "@website-chatbot/server",
   "version": "0.1.0",
   "private": true,
+  "license": "AGPL-3.0-only",
   "type": "module",
   "scripts": {
     "dev": "wrangler dev --port 8790 --ip 127.0.0.1",

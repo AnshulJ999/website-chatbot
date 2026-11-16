@@ -206,9 +206,23 @@ const bearer = (c: Context<App>) => !!c.env.API_TOKEN && c.req.header("Authoriza
 
 app.put("/api/sync/site", async (c) => {
   if (!bearer(c)) return c.text("unauthorized", 401);
-  const site = await c.req.json<SiteConfig>();
-  const missing = (["key", "name", "assistantName", "ownerName", "storeName", "instruction", "ownerEmail", "emailFrom"] as const).filter((k) => !site[k]);
+  const body = await c.req.json<Partial<SiteConfig>>();
+  const missing = (["key", "name", "assistantName", "ownerName", "storeName", "instruction", "ownerEmail", "emailFrom"] as const).filter((k) => !body[k]);
   if (missing.length) return c.json({ error: `missing: ${missing.join(", ")}` }, 400);
+  // Optional fields get working defaults, so a minimal config gives a usable widget.
+  const site = {
+    talkLabel: "Talk to a person",
+    greeting: `Hi! Ask me anything about ${body.name}.`,
+    noticeText: "Chats are saved so you can pick up later.",
+    contactEmail: body.ownerEmail,
+    starters: [],
+    theme: {},
+    ui: {},
+    proactive: { enabled: false, delaySec: 6, text: "" },
+    origins: [],
+    tools: [],
+    ...body,
+  } as SiteConfig;
   await db.putSite(c.env.DB, site);
   return c.json({ ok: true, key: site.key });
 });
@@ -311,6 +325,8 @@ app.get("/admin/api/prompt/:key", async (c) => {
 app.post("/admin/api/chats/:id/archive", async (c) => {
   const { archived } = await c.req.json<{ archived?: boolean }>();
   await db.setArchived(c.env.DB, c.req.param("id"), archived !== false);
+  // An archived chat no longer waits for the owner.
+  if (archived !== false) await room(c.env, c.req.param("id")).clearWaiting();
   await hub(c.env).chat(c.req.param("id"));
   return c.json({ ok: true });
 });
@@ -355,7 +371,9 @@ app.get("/admin/api/enquiries", async (c) => c.json(await db.listEnquiries(c.env
 app.patch("/admin/api/enquiries/:id", async (c) => {
   const { status } = await c.req.json<{ status: "new" | "replied" | "closed" }>();
   if (!["new", "replied", "closed"].includes(status)) return c.json({ error: "bad status" }, 400);
-  await db.setEnquiryStatus(c.env.DB, c.req.param("id"), status);
+  const chatId = await db.setEnquiryStatus(c.env.DB, c.req.param("id"), status);
+  // A message marked Replied or Closed means its chat no longer waits for the owner.
+  if (chatId && status !== "new") await room(c.env, chatId).clearWaiting();
   return c.json({ ok: true });
 });
 
@@ -379,6 +397,9 @@ function sanitizeSettings(p: Partial<Settings>): Partial<Settings> {
     ["chatCapUsd", 0, 100],
     ["dailyBudgetUsd", 0, 1000],
     ["perVisitorDailyMessages", 1, 1000],
+    ["visitorMessagesPerDay", 1, 100],
+    ["visitorEmailsPerDay", 0, 10000],
+    ["wantsYouAlertEveryMin", 0, 1440],
     ["maxMessageChars", 100, 10000],
     ["stallTimeoutSec", 5, 300],
     ["modelTimeoutSec", 5, 600],
@@ -423,24 +444,28 @@ app.post("/api/email/resend", async (c) => {
   const event = JSON.parse(body) as { type?: string; data?: { email_id?: string } };
   const id = event.data?.email_id;
   if (event.type !== "email.received" || !id) return c.text("ignored");
-  // Answer at once: Resend retries anything slow or non-2xx.
-  c.executionCtx.waitUntil(receiveResend(c.env, id).catch((e) => console.error("resend inbound", id, e)));
+  // Deliver before answering: an error answer makes Resend send the notice again later, and the chat ignores a repeat.
+  try {
+    await receiveResend(c.env, id);
+  } catch (e) {
+    console.error("resend inbound", id, e);
+    await db.logIncident(c.env.DB, { site: "-", kind: "inbound_failed", detail: `email ${id}: ${e instanceof Error ? e.message : String(e)}` }).catch(() => undefined);
+    return c.text("retry later", 503);
+  }
   return c.text("ok");
 });
 
 async function receiveResend(env: Env, id: string): Promise<void> {
-  // Retries of the same notice deliver once.
-  if (!(await db.alertDue(env.DB, `inbound:${id}`, 30 * 86_400_000))) return;
   const res = await fetch(`https://api.resend.com/emails/receiving/${id}`, { headers: { Authorization: `Bearer ${env.RESEND_API_KEY}` } });
   if (!res.ok) throw new Error(`fetch received email: ${res.status}`);
   const mail = (await res.json()) as { from?: string; to?: string[]; text?: string | null; html?: string | null };
   const text = mail.text ?? htmlToText(mail.html ?? "");
-  const result = await deliverReply(env, mail.to ?? [], mail.from ?? "", text);
+  const result = await deliverReply(env, mail.to ?? [], mail.from ?? "", text, id);
   if (result !== "ok") console.log("resend inbound", id, result, mail.to);
 }
 
 /** A visitor's email reply, from either inbound path: the address holds the chat's signed tag. */
-async function deliverReply(env: Env, to: string[], from: string, text: string): Promise<"ok" | "unknown" | "empty"> {
+async function deliverReply(env: Env, to: string[], from: string, text: string, emailId?: string): Promise<"ok" | "unknown" | "empty"> {
   for (const raw of to) {
     const address = /<([^>]+)>/.exec(raw)?.[1] ?? raw;
     const local = address.trim().split("@")[0] ?? "";
@@ -449,7 +474,7 @@ async function deliverReply(env: Env, to: string[], from: string, text: string):
     if (!chatId) continue;
     const body = stripQuoted(text);
     if (!body) return "empty";
-    await room(env, chatId).emailReply(from, body);
+    await room(env, chatId).emailReply(from, body, emailId);
     return "ok";
   }
   return "unknown";
@@ -492,7 +517,7 @@ export default {
       return;
     }
     const parsed = await PostalMime.parse(message.raw);
-    await deliverReply(env, [message.to], message.from, parsed.text ?? "");
+    await deliverReply(env, [message.to], message.from, parsed.text ?? htmlToText(parsed.html ?? ""));
   },
 
   /** Optional: with a cron trigger configured, the clean-up also runs on schedule. */

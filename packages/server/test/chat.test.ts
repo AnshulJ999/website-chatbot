@@ -15,11 +15,15 @@ async function setSettings(patch: Partial<Settings>): Promise<void> {
 class Peer {
   messages: ChatMessage[] = [];
   statuses: ChatStatus[] = [];
+  deltas = 0;
   constructor(readonly ws: WebSocket) {
     ws.accept();
     ws.addEventListener("message", (e) => {
       const data = String(e.data);
-      if (data.startsWith("D")) return;
+      if (data.startsWith("D") || data.startsWith("B")) {
+        this.deltas++;
+        return;
+      }
       const m = JSON.parse(data) as ServerMsg;
       if (m.t === "message") this.messages.push(m.message);
       if (m.t === "history") this.messages.push(...m.messages);
@@ -41,7 +45,7 @@ class Peer {
   }
 }
 
-async function openChat(scenario = "none"): Promise<{ visitor: Peer; chatId: string }> {
+async function openChat(scenario = "none"): Promise<{ visitor: Peer; chatId: string; reconnect: () => Promise<Peer> }> {
   const res = await SELF.fetch("http://chatbot.test/api/session", {
     method: "POST",
     headers: { "Content-Type": "application/json", Origin: ORIGIN },
@@ -55,9 +59,17 @@ async function openChat(scenario = "none"): Promise<{ visitor: Peer; chatId: str
   });
   expect(res.status).toBe(200);
   const s = (await res.json()) as SessionResponse;
-  const ws = await SELF.fetch(`http://chatbot.test/api/chat/ws?token=${encodeURIComponent(s.token)}&page=/`, { headers: { Upgrade: "websocket", Origin: ORIGIN } });
-  expect(ws.webSocket).toBeTruthy();
-  return { visitor: new Peer(ws.webSocket!), chatId: s.chatId };
+  const connect = async () => {
+    const ws = await SELF.fetch(`http://chatbot.test/api/chat/ws?token=${encodeURIComponent(s.token)}&page=/`, { headers: { Upgrade: "websocket", Origin: ORIGIN } });
+    expect(ws.webSocket).toBeTruthy();
+    return new Peer(ws.webSocket!);
+  };
+  return { visitor: await connect(), chatId: s.chatId, reconnect: connect };
+}
+
+async function ownerSocket(chatId: string): Promise<Peer> {
+  const res = await SELF.fetch(`http://chatbot.test/admin/api/chats/${chatId}/ws`, { headers: { Upgrade: "websocket" } });
+  return new Peer(res.webSocket!);
 }
 
 async function incidents(chatId: string, kind: string): Promise<{ model: string | null }[]> {
@@ -103,6 +115,18 @@ describe("answers", () => {
     expect(visitor.status?.reason).toBe("cap");
     expect(aiAnswers(visitor)).toHaveLength(1);
   });
+
+  // A chat that got the contact form after a failed answer used to stay a form on every later visit.
+  it("gives a failed chat back to the AI when the visitor comes back", async () => {
+    const { visitor, reconnect } = await openChat("omnara_down");
+    visitor.send({ t: "send", id: "m1", text: "Hello" });
+    await visitor.until(() => visitor.status?.mode === "form");
+    expect(visitor.status?.reason).toBe("ai_unavailable");
+    visitor.ws.close();
+    const again = await reconnect();
+    await again.until(() => again.status !== undefined);
+    expect(again.status?.mode).toBe("ai");
+  });
 });
 
 describe("owner takeover", () => {
@@ -111,8 +135,7 @@ describe("owner takeover", () => {
     visitor.send({ t: "send", id: "m1", text: "Hello" });
     await visitor.until(() => aiAnswers(visitor).length === 1);
 
-    const res = await SELF.fetch(`http://chatbot.test/admin/api/chats/${chatId}/ws`, { headers: { Upgrade: "websocket" } });
-    const owner = new Peer(res.webSocket!);
+    const owner = await ownerSocket(chatId);
     owner.send({ t: "owner_send", id: "o1", text: "Hi, it's me", email: false });
     await visitor.until(() => visitor.messages.some((m) => m.role === "owner" && m.text === "Hi, it's me"));
     expect(visitor.status?.mode).toBe("owner");
@@ -121,5 +144,32 @@ describe("owner takeover", () => {
     await owner.until(() => owner.messages.some((m) => m.id === "m2"));
     await new Promise((r) => setTimeout(r, 2500));
     expect(aiAnswers(visitor)).toHaveLength(1);
+  });
+
+  // Joining used to cut the answer off: half an answer, "The answer stopped early", and a logged failure.
+  it("lets an answer in progress finish when the owner joins", async () => {
+    const { visitor, chatId } = await openChat("table");
+    visitor.send({ t: "send", id: "m1", text: "What does it cost?" });
+    await visitor.until(() => visitor.deltas > 3);
+    const owner = await ownerSocket(chatId);
+    owner.send({ t: "owner_join" });
+    await visitor.until(() => aiAnswers(visitor).length === 1);
+    expect(aiAnswers(visitor)[0]!.text).toContain("| Pro |");
+    expect(visitor.messages.some((m) => m.role === "system" && m.text.includes("stopped early"))).toBe(false);
+    expect(await incidents(chatId, "answer_partial")).toEqual([]);
+    expect(visitor.status?.mode).toBe("owner");
+  });
+
+  // "Waiting for you" used to stay set until the owner typed a reply in that chat.
+  it("clears Waiting for you when the owner hands the chat back", async () => {
+    const { visitor, chatId } = await openChat();
+    visitor.send({ t: "talk_to_owner" });
+    await visitor.until(() => visitor.status?.wantsOwner === true);
+    const owner = await ownerSocket(chatId);
+    owner.send({ t: "owner_join" });
+    await visitor.until(() => visitor.status?.mode === "owner");
+    owner.send({ t: "owner_hand_back" });
+    await visitor.until(() => visitor.status?.mode === "ai");
+    expect(visitor.status?.wantsOwner).toBe(false);
   });
 });

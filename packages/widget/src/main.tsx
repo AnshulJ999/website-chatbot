@@ -2,7 +2,7 @@ import { render } from "preact";
 import { DEFAULT_UI, type PublicSiteConfig, type SessionRequest, type ThemeMap, type WidgetUi } from "@website-chatbot/shared";
 import { App } from "./App";
 import { ChatClient } from "./client";
-import { greetingDue, greetingShown } from "./greeting";
+import { autoOpenDue, canAutoOpen, countPage, greetingDue, greetingShown, watchAutoOpen } from "./greeting";
 import { live, patch, site, ui } from "./store";
 import css from "./styles.css?inline";
 import { applyTheme } from "./theme";
@@ -20,6 +20,8 @@ export interface WidgetOptions {
 declare global {
   /** True in the Playground (dev server and its hosted build); false in the visitor widget. */
   const __WCB_PLAYGROUND__: boolean;
+  /** True where the Design menu's look choices apply: the Playground and the preview build for sites' dev pages. */
+  const __WCB_DESIGN__: boolean;
   interface Window {
     WebsiteChatbotOptions?: WidgetOptions;
     WebsiteChatbot?: { open(): void; close(): void; newChat(): void };
@@ -71,11 +73,18 @@ async function loadSite(server: string, key: string): Promise<PublicSiteConfig |
  */
 function scheduleBubble(s: PublicSiteConfig, client: ChatClient): void {
   const due = greetingDue(s.proactive.repeat);
+  const pages = countPage();
+  // The "open" greeting opens the chat itself on large screens; phones get the bubble.
+  const opens = s.proactive.enabled && s.proactive.style === "open" && canAutoOpen();
   setTimeout(async () => {
     if (live.value.open) return;
     let text = "";
     if (await client.ownerReplied()) text = `${s.ownerName.charAt(0).toUpperCase()}${s.ownerName.slice(1)} replied to your message`;
-    else if (due && s.proactive.enabled) text = live.value.messages.length ? "Welcome back! Pick up where you left off?" : s.proactive.text;
+    else if (opens && !live.value.messages.length) {
+      // Counted from page load.
+      if (autoOpenDue()) watchAutoOpen(s, pages, true, performance.timeOrigin);
+      return;
+    } else if (due && s.proactive.enabled) text = live.value.messages.length ? "Welcome back! Pick up where you left off?" : s.proactive.text;
     if (!text || live.value.open) return;
     patch({ bubble: true, bubbleText: text });
     greetingShown();
@@ -117,7 +126,7 @@ export async function boot(opts: WidgetOptions): Promise<void> {
     newChat: () => void client.newChat(),
   };
 
-  if (__WCB_PLAYGROUND__) {
+  if (__WCB_DESIGN__) {
     const dev = await import("./dev");
     dev.initDev(host, opts, client);
   }

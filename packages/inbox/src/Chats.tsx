@@ -1,8 +1,11 @@
-import { Archive, ArchiveRestore, ArrowLeft, Bot, Globe, Hand, Info, Mail, MonitorSmartphone, Send, UserRound, X } from "lucide-react";
+import { Archive, ArchiveRestore, ArrowLeft, Bot, Check, Globe, Hand, Info, Mail, MonitorSmartphone, Send, UserRound, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { newId, renderMarkdown, visitorLabel, type ChatMessage, type ChatStatus, type ChatSummary, type VisitorLabel } from "@website-chatbot/shared";
 import { ago, api, chatSocket, usd, type ChatDetail } from "./api";
 import { Badge, Button, Empty, ErrorLine } from "./ui";
+
+/** Chats per page, as the server sends them. */
+const PAGE = 50;
 
 const FILTERS = [
   { id: "all", label: "All" },
@@ -27,14 +30,32 @@ export function Chats({ selected, sites, event, labelStyle }: { selected?: strin
   const [error, setError] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
   const [archiving, setArchiving] = useState(false);
+  const [more, setMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
 
   useEffect(() => {
     setChats(null);
     api
       .chats(filter, site)
-      .then(setChats)
+      .then((list) => {
+        setChats(list);
+        setMore(list.length >= PAGE);
+      })
       .catch((e: Error) => setError(e.message));
   }, [filter, site, reload]);
+
+  const loadMore = async () => {
+    if (!chats?.length) return;
+    setLoadingMore(true);
+    try {
+      const older = await api.chats(filter, site, Math.min(...chats.map((c) => c.updatedAt)));
+      setChats((list) => [...(list ?? []), ...older.filter((c) => !list?.some((x) => x.id === c.id))]);
+      setMore(older.length >= PAGE);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+    setLoadingMore(false);
+  };
 
   const archiveTests = async () => {
     setArchiving(true);
@@ -132,6 +153,13 @@ export function Chats({ selected, sites, event, labelStyle }: { selected?: strin
               </a>
             </li>
           ))}
+          {more && (
+            <li className="p-3">
+              <Button className="w-full" disabled={loadingMore} onClick={() => void loadMore()}>
+                {loadingMore ? "Loading…" : "Load older chats"}
+              </Button>
+            </li>
+          )}
         </ul>
       </section>
       <section className={`min-w-0 flex-1 ${selected ? "flex" : "hidden md:flex"}`}>
@@ -149,15 +177,18 @@ function ChatView({ id, siteName, labelStyle }: { id: string; siteName: (k: stri
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState(false);
+  const [done, setDone] = useState(false);
   const sock = useRef<ReturnType<typeof chatSocket> | null>(null);
   const bottom = useRef<HTMLDivElement>(null);
+  const atBottom = useRef(true);
 
   useEffect(() => {
     api
       .chat(id)
       .then((d) => {
         setDetail(d);
-        setMessages(d.messages);
+        // The live socket may already have newer messages: keep them.
+        setMessages((live) => merge(d.messages, live));
       })
       .catch((e: Error) => setError(e.message));
     void api.markRead(id).catch(() => {});
@@ -165,9 +196,9 @@ function ChatView({ id, siteName, labelStyle }: { id: string; siteName: (k: stri
       id,
       (m) => {
         if (m.t === "history") {
-          setMessages(m.messages);
+          setMessages((l) => merge(l, m.messages));
           setStatus(m.status);
-        } else if (m.t === "message") setMessages((l) => [...l.filter((x) => x.id !== m.message.id), m.message].sort((a, b) => a.seq - b.seq));
+        } else if (m.t === "message") setMessages((l) => merge(l, [m.message]));
         else if (m.t === "update") setMessages((l) => l.map((x) => (x.id === m.message.id ? m.message : x)));
         else if (m.t === "status") setStatus(m.status);
         else if (m.t === "presence") setPresence({ visitorOnline: m.visitorOnline, page: m.page });
@@ -177,9 +208,10 @@ function ChatView({ id, siteName, labelStyle }: { id: string; siteName: (k: stri
     return () => sock.current?.close();
   }, [id]);
 
+  // Follow new messages only while already at the bottom, so reading older ones isn't interrupted.
   useEffect(() => {
     // Braces matter: newer browsers return a Promise from scrollIntoView, which React would treat as a cleanup.
-    void bottom.current?.scrollIntoView({ block: "end" });
+    if (atBottom.current) void bottom.current?.scrollIntoView({ block: "end" });
   }, [messages.length, status?.busy]);
 
   const chat = detail?.chat;
@@ -257,13 +289,23 @@ function ChatView({ id, siteName, labelStyle }: { id: string; siteName: (k: stri
               {presence.visitorOnline ? <span className="text-ok">On the site{presence.page ? ` · ${presence.page}` : ""}</span> : "Left the site"} · {siteName(chat.site)}
             </p>
           </div>
+          {(status?.wantsOwner || (chat.wantsOwner && !done)) && (
+            <Button
+              onClick={() => {
+                sock.current?.send({ t: "owner_done" });
+                setDone(true);
+              }}
+              disabled={!connected} title={'Clears "Waiting for you" without replying'} className="px-2 md:px-3">
+              <Check size={15} /> <span className="hidden sm:inline">Done</span>
+            </Button>
+          )}
           {status?.mode === "owner" ? (
             <Button onClick={() => sock.current?.send({ t: "owner_hand_back" })} title="The AI answers the visitor's next message" className="px-2 md:px-3">
               <Bot size={15} /> <span className="hidden sm:inline">Hand back to AI</span>
               <span className="sm:hidden">Hand back</span>
             </Button>
           ) : (
-            <Button variant="primary" onClick={() => sock.current?.send({ t: "owner_join" })} disabled={!connected} title="The AI stops answering this chat" className="px-2 md:px-3">
+            <Button variant="primary" onClick={() => sock.current?.send({ t: "owner_join" })} disabled={!connected} title="You answer from here on; an answer the AI is writing still finishes" className="px-2 md:px-3">
               <Hand size={15} /> <span className="hidden sm:inline">Join chat</span>
               <span className="sm:hidden">Join</span>
             </Button>
@@ -290,7 +332,13 @@ function ChatView({ id, siteName, labelStyle }: { id: string; siteName: (k: stri
           </div>
         )}
 
-        <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3 md:p-4">
+        <div
+          className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3 md:p-4"
+          onScroll={(e) => {
+            const el = e.currentTarget;
+            atBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+          }}
+        >
           {messages.length === 0 && <p className="text-center text-sm text-muted-fg">No messages yet.</p>}
           {messages.map((m) => (
             <Bubble key={m.id} m={m} />
@@ -308,6 +356,13 @@ function ChatView({ id, siteName, labelStyle }: { id: string; siteName: (k: stri
       </aside>
     </div>
   );
+}
+
+/** Both lists, one copy per message, in order. */
+function merge(a: ChatMessage[], b: ChatMessage[]): ChatMessage[] {
+  const byId = new Map(a.map((m) => [m.id, m]));
+  for (const m of b) byId.set(m.id, m);
+  return [...byId.values()].sort((x, y) => x.seq - y.seq);
 }
 
 function Detail({ icon: Icon, label, children }: { icon: typeof Globe; label: string; children: React.ReactNode }) {

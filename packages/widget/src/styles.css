@@ -372,7 +372,8 @@ a {
   border-radius: var(--r-sm);
   box-shadow: var(--shadow);
 }
-.menu > button {
+.menu > button,
+.menu > a {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -380,8 +381,11 @@ a {
   padding: 8px 10px;
   border-radius: 6px;
   text-align: left;
+  color: inherit;
+  text-decoration: none;
 }
-.menu > button:hover:not(:disabled) {
+.menu > button:hover:not(:disabled),
+.menu > a:hover {
   background: var(--muted);
 }
 .menu-online {
@@ -803,6 +807,29 @@ textarea {
 }
 .offline {
   margin: auto 0;
+}
+.more-starters {
+  align-self: flex-start;
+  margin-top: 2px;
+  font-size: 13px;
+}
+.talkbar-quiet {
+  justify-content: flex-end;
+}
+.credit {
+  margin: 0;
+  padding: 0 16px 8px;
+  font-size: 11px;
+  text-align: center;
+  background: var(--surface);
+}
+.credit a {
+  color: var(--muted-fg);
+  text-decoration: none;
+}
+.credit a:hover {
+  color: var(--fg);
+  text-decoration: underline;
 }
 
 .toast {

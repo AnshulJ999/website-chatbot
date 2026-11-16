@@ -22,18 +22,23 @@ export class OmnaraBrain implements Brain {
   async turn(state: BrainState, req: TurnRequest, cb: TurnCallbacks): Promise<TurnResult> {
     const actor: Actor | undefined = this.useActor ? { provider_tenant_id: req.site.key, provider_user_id: req.visitorId } : undefined;
     const config = agentConfig(req.site, req.tier, req.ownerTest);
+    const fingerprint = hash(JSON.stringify(config));
     const launch = async () => {
       state.agentId = await this.api.launch({ name: `${req.site.key} chat`, config, text: req.text, actor, key: req.key });
       state.lastSeq = 0;
       state.model = req.tier.model;
+      state.config = fingerprint;
+      state.agentCostUsd = 0;
     };
     try {
       if (!state.agentId) await launch();
       else {
         try {
-          if (state.model !== req.tier.model) {
+          // A model switch or edited rules, instructions or site brief reach chats already open.
+          if (state.config !== fingerprint || state.model !== req.tier.model) {
             await this.api.updateConfig(state.agentId, config);
             state.model = req.tier.model;
+            state.config = fingerprint;
           }
           await this.api.sendInput(state.agentId, req.text, actor, req.key);
         } catch (e) {
@@ -167,6 +172,16 @@ export class OmnaraBrain implements Brain {
   async archive(state: BrainState): Promise<void> {
     if (state.agentId) await this.api.archive(state.agentId);
   }
+}
+
+/** FNV-1a: a short, stable fingerprint of a string. */
+function hash(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36);
 }
 
 function textOf(blocks: ContentBlock[]): string {

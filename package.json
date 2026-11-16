@@ -1,6 +1,7 @@
 {
   "name": "website-chatbot",
   "private": true,
+  "license": "AGPL-3.0-only",
   "description": "An AI chat widget for your website that answers from your own pages, with live takeover, email replies and an owner inbox. Runs on Cloudflare Workers with Omnara agents.",
   "keywords": ["chatbot", "chat-widget", "ai-assistant", "cloudflare-workers", "durable-objects", "omnara", "preact", "customer-support"],
   "repository": { "type": "git", "url": "https://github.com/AnshulJ999/website-chatbot" },

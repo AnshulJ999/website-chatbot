@@ -72,18 +72,30 @@ export function emit(event: AnalyticsEvent, props: Record<string, unknown> = {})
   }
 }
 
+/** Waits between tries while the server can't be reached: about five minutes in all. */
+const RETRY_DELAYS = [2000, 5000, 10_000, 20_000, 30_000, 60_000, 60_000, 60_000];
+
 export class ChatClient {
   private ws?: WebSocket;
   private session?: SessionResponse;
   private outbox: ClientMsg[] = [];
+  /** Visitor messages sent but not yet confirmed by the server; sent again after a reconnect. */
+  private pending = new Map<string, { text: string; at: number }>();
   private retries = 0;
+  private failures = 0;
+  private retryTimer?: number;
   private pageTimer?: number;
   private lastPage = pageUrl();
   private previewCtx = "";
   private closedByUs = false;
   private starting?: Promise<boolean>;
 
-  constructor(private readonly o: ClientOptions) {}
+  constructor(private readonly o: ClientOptions) {
+    window.addEventListener("online", () => {
+      const conn = live.value.conn;
+      if (conn === "unreachable" || conn === "reconnecting") this.retryNow();
+    });
+  }
 
   /** Shows the saved chat straight away; the server's copy replaces it once connected. */
   hydrate(): void {
@@ -135,20 +147,16 @@ export class ChatClient {
     try {
       res = await fetch(`${this.o.server}/api/session`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     } catch {
-      patch({ conn: "unreachable" });
-      return false;
+      return this.unreachable(true);
     }
     if (res.status === 401 && !turnstileToken) {
       const { siteKey } = (await res.json().catch(() => ({}))) as { siteKey?: string };
       const token = siteKey ? await turnstile(siteKey) : null;
       if (token) return this.doStart(newChat, token);
-      patch({ conn: "unreachable" });
-      return false;
+      return this.unreachable(false);
     }
-    if (!res.ok) {
-      patch({ conn: "unreachable" });
-      return false;
-    }
+    // A server error or rate limit may pass; a refused site or origin won't.
+    if (!res.ok) return this.unreachable(res.status >= 500 || res.status === 429);
     this.session = (await res.json()) as SessionResponse;
     site.value = this.session.site;
     persist(this.o.siteKey, { visitorId: this.session.visitorId, visitorKey: this.session.visitorKey, chatId: this.session.chatId });
@@ -174,6 +182,8 @@ export class ChatClient {
     this.ws = ws;
     ws.onopen = () => {
       this.retries = 0;
+      this.failures = 0;
+      clearTimeout(this.retryTimer);
       patch({ conn: "open" });
       for (const m of this.outbox.splice(0)) ws.send(JSON.stringify(m));
       this.watchPage();
@@ -189,6 +199,36 @@ export class ChatClient {
         if (this.ws === ws) void this.doStart(false);
       }, delay);
     };
+  }
+
+  /** Shows "Chat isn't available" and, when it may pass, keeps trying in the background. */
+  private unreachable(retry: boolean): false {
+    patch({ conn: "unreachable" });
+    clearTimeout(this.retryTimer);
+    if (retry && this.failures < RETRY_DELAYS.length) {
+      this.retryTimer = window.setTimeout(() => void this.start(), RETRY_DELAYS[this.failures++]);
+    }
+    return false;
+  }
+
+  /** "Try again", or the browser is back online: start over at once. */
+  retryNow(): void {
+    clearTimeout(this.retryTimer);
+    this.failures = 0;
+    this.retries = 0;
+    void this.start();
+  }
+
+  /** Whether the owner is online now; the panel asks about once a minute so "Online now" can't go stale. */
+  async checkPresence(): Promise<void> {
+    try {
+      const res = await fetch(`${this.o.server}/api/presence`, { cache: "no-store" });
+      if (!res.ok) return;
+      const { ownerOnline } = (await res.json()) as { ownerOnline: boolean };
+      if (ownerOnline !== live.value.status.ownerOnline) patch({ status: { ...live.value.status, ownerOnline } });
+    } catch {
+      // keep the last known status
+    }
   }
 
   private onMessage(data: string): void {
@@ -212,11 +252,19 @@ export class ChatClient {
     }
     const msg = JSON.parse(data) as ServerMsg;
     switch (msg.t) {
-      case "history":
-        patch({ messages: msg.messages, status: msg.status, preview: "", loading: false });
+      case "history": {
+        // A message sent as the connection dropped never reached the server: send it again (the server ignores repeats).
+        const have = new Set(msg.messages.map((m) => m.id));
+        const resend = [...this.pending].filter(([id, p]) => !have.has(id) && Date.now() - p.at < 120_000);
+        this.pending = new Map(resend);
+        const mine = resend.map(([id, p]) => ({ id, seq: Number.MAX_SAFE_INTEGER, role: "visitor" as const, text: p.text, at: p.at }));
+        patch({ messages: [...msg.messages, ...mine], status: mine.length ? { ...msg.status, busy: msg.status.mode === "ai" } : msg.status, preview: "", loading: false });
+        for (const m of mine) this.ws?.send(JSON.stringify({ t: "send", id: m.id, text: m.text } satisfies ClientMsg));
         this.saveCache();
         return;
+      }
       case "message": {
+        if (msg.message.role === "visitor") this.pending.delete(msg.message.id);
         const list = live.value.messages.filter((m) => m.id !== msg.message.id);
         list.push(msg.message);
         list.sort((a, b) => a.seq - b.seq);
@@ -237,6 +285,8 @@ export class ChatClient {
         patch({ preview: "" });
         return;
       case "error":
+        // A message refused while an answer was running is not stored, so it isn't sent again later.
+        if (msg.code === "busy") this.pending.clear();
         flash(msg.text, msg.code.endsWith("_sent") ? "info" : "error");
         return;
       default:
@@ -259,8 +309,14 @@ export class ChatClient {
       messages: [...live.value.messages, { id, seq: Number.MAX_SAFE_INTEGER, role: "visitor", text, at: Date.now() }],
       status: { ...live.value.status, busy: live.value.status.mode === "ai" },
     });
+    this.pending.set(id, { text, at: Date.now() });
     this.send({ t: "send", id, text });
     if (first) emit("first_message");
+  }
+
+  /** "Try the assistant again" on the form shown after a failed answer. */
+  retryAi(): void {
+    this.send({ t: "retry_ai" });
   }
 
   talkToOwner(): void {
@@ -283,6 +339,7 @@ export class ChatClient {
   }
 
   newChat(): Promise<boolean> {
+    this.pending.clear();
     return this.start(true);
   }
 
@@ -335,6 +392,7 @@ export class ChatClient {
   /** Reopens one of the visitor's earlier chats. */
   switchTo(chatId: string): Promise<boolean> {
     persist(this.o.siteKey, { ...load(this.o.siteKey), chatId });
+    this.pending.clear();
     patch({ messages: [], preview: "", formDismissed: false, loading: true });
     this.starting = this.doStart(false).finally(() => (this.starting = undefined));
     return this.starting;

@@ -36,6 +36,12 @@ export interface Settings {
   dailyBudgetUsd: number;
   budgetAction: LimitAction;
   perVisitorDailyMessages: number;
+  /** Messages a visitor may leave (form or AI) plus chat copies they may email themselves, per day. */
+  visitorMessagesPerDay: number;
+  /** Emails sent to visitors (confirmations and chat copies) per day across all sites; past it, none go out. */
+  visitorEmailsPerDay: number;
+  /** "Wants you" alerts for one chat at most this often. */
+  wantsYouAlertEveryMin: number;
   maxMessageChars: number;
   /** Silence: no sign of life at all from the model (thinking, lookups or words) for this long = stuck, try the next model. */
   stallTimeoutSec: number;
@@ -74,6 +80,9 @@ export const DEFAULT_SETTINGS: Settings = {
   dailyBudgetUsd: 2,
   budgetAction: "get_in_touch",
   perVisitorDailyMessages: 40,
+  visitorMessagesPerDay: 3,
+  visitorEmailsPerDay: 20,
+  wantsYouAlertEveryMin: 5,
   maxMessageChars: 2000,
   stallTimeoutSec: 15,
   modelTimeoutSec: 30,
@@ -139,6 +148,16 @@ export interface WidgetUi {
   notice: "welcome" | "under" | "menu";
   /** Copy and rating buttons under answers: on hover only, or always shown. */
   actions: "hover" | "always";
+  /** While the owner is away: "Away" status beside the talk button, a quiet "Leave a message" link, or that link in the menu only. */
+  away: "status" | "link" | "menu";
+  /** Streaming answers: shown as they arrive, or with unfinished formatting held back. */
+  stream: "raw" | "tidy";
+  /** Starter questions shown at once; more than three show as a list. */
+  starters: number;
+  /** "More questions" under the starters walks through the rest of the page's list. */
+  moreStarters: "off" | "on";
+  /** Where the credit line (site config `credit`) shows. */
+  credit: "off" | "menu" | "footer";
 }
 
 export const DEFAULT_UI: WidgetUi = {
@@ -149,6 +168,11 @@ export const DEFAULT_UI: WidgetUi = {
   talkPlacement: "bar",
   notice: "welcome",
   actions: "hover",
+  away: "status",
+  stream: "raw",
+  starters: 4,
+  moreStarters: "off",
+  credit: "off",
 };
 
 /** What the widget may know about a site. */
@@ -168,8 +192,14 @@ export interface PublicSiteConfig {
   noticeText: string;
   theme: ThemeMap;
   ui: Partial<WidgetUi>;
-  /** The greeting bubble; `repeat` = how often it may show: once per tab session (default), once per day, or on every page load. */
-  proactive: { enabled: boolean; delaySec: number; text: string; repeat?: GreetingRepeat };
+  /**
+   * The greeting: a bubble above the closed chat (`delaySec` after load, as often as `repeat` allows), or with
+   * `style: "open"` the chat itself opens after `openAfterSec` once the visitor has scrolled or seen a second page
+   * (desktop only; phones get the bubble).
+   */
+  proactive: { enabled: boolean; delaySec: number; text: string; repeat?: GreetingRepeat; style?: "bubble" | "open"; openAfterSec?: number };
+  /** A small credit line ("This chat is open source") with a link; where it shows is `ui.credit`. */
+  credit?: { text: string; url: string };
   turnstileSiteKey?: string;
 }
 
@@ -196,6 +226,8 @@ export interface SiteConfig extends PublicSiteConfig {
    * inbound mail must reach this server (Resend Receiving webhook or Cloudflare Email Routing). Default: REPLY_DOMAIN.
    */
   replyDomain?: string;
+  /** What the bot may say when asked how this chat assistant was built; empty = it says nothing about it. */
+  aboutChat?: string;
   /** Short name at the start of alert titles ("Portfolio chat - ..."); default: name. */
   alertName?: string;
   /** ntfy alerts: names of the server secrets holding the topic URL and its token (topics stay out of public repos). Default: NTFY_URL / NTFY_TOKEN. */
@@ -221,6 +253,7 @@ export function toPublic(site: SiteConfig): PublicSiteConfig {
     theme: site.theme,
     ui: site.ui,
     proactive: site.proactive,
+    credit: site.credit,
     turnstileSiteKey: site.turnstileSiteKey,
   };
 }

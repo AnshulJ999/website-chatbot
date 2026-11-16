@@ -5,6 +5,13 @@ export const TALK_WORDING: Record<string, string> = {
   c: "Contact support",
 };
 
+export const CREDIT_WORDING: Record<string, string> = {
+  open: "Open-source chat",
+  isopen: "This chat is open source",
+  omnara: "Built on Omnara",
+  anshul: "Built by Anshul",
+};
+
 export const OWNER_NAMES: Record<string, string> = {
   anshul: "Anshul",
   developer: "the developer",

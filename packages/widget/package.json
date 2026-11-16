@@ -2,10 +2,11 @@
   "name": "@website-chatbot/widget",
   "version": "0.1.0",
   "private": true,
+  "license": "AGPL-3.0-only",
   "type": "module",
   "scripts": {
     "dev": "vite --port 5290 --strictPort --host 127.0.0.1",
-    "build": "vite build && vite build --mode playground",
+    "build": "vite build && vite build --mode preview && vite build --mode playground",
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {

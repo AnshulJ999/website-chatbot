@@ -34,6 +34,39 @@ const cells = (line: string) =>
 const isTableRow = (line: string) => /^\s*\|.*\|\s*$/.test(line);
 const isTableRule = (line: string) => /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(line);
 
+/**
+ * An answer still streaming, without its unfinished end, so half-written Markdown doesn't flash as raw text:
+ * a table is held back until its header and rule line are in (then each row until it ends), and on the last
+ * line an open bold or code span is closed and a half-typed link shows only its words.
+ */
+export function tidyStreaming(src: string): string {
+  const lines = src.split("\n");
+  // Inside an open code fence the rest already shows as code.
+  if (lines.filter((l) => /^\s*```/.test(l)).length % 2 === 1) return src;
+  let end = lines.length;
+  // A finished line ends with a line break, which leaves an empty last line.
+  const tail = lines[end - 1] === "" ? end - 1 : end;
+  let start = tail;
+  while (start > 0 && /^\s*\|/.test(lines[start - 1]!)) start--;
+  if (start < tail) {
+    const block = lines.slice(start, tail);
+    const finished = tail < end || isTableRow(block[block.length - 1]!);
+    if (block.length < 2 || !isTableRule(block[1]!) || (block.length === 2 && !finished)) end = start;
+    else if (!finished) end = tail - 1;
+  }
+  const kept = lines.slice(0, end);
+  let last = kept.pop() ?? "";
+  last = last
+    .replace(/\[([^\]]*)\]\([^)]*$/, "$1")
+    .replace(/\[([^\]]*)\]?$/, "$1")
+    .replace(/(^|[^*])\*$/, "$1");
+  const ticks = (last.replace(/```/g, "").match(/`/g) ?? []).length;
+  if (ticks % 2 === 1) last = last.endsWith("`") ? last.slice(0, -1) : `${last}\``;
+  const bolds = (last.replace(/`[^`]*`/g, "").match(/\*\*/g) ?? []).length;
+  if (bolds % 2 === 1) last = /\*\*\s*$/.test(last) ? last.replace(/\*\*\s*$/, "") : `${last}**`;
+  return [...kept, last].join("\n");
+}
+
 export interface MarkdownOptions {
   /** Adds a Copy button to code blocks (the page handles clicks on `.code-copy`). */
   copyButtons?: boolean;

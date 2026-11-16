@@ -10,7 +10,7 @@ export interface Env {
   OMNARA_API: string;
   OMNARA_ORG_ID: string;
   OMNARA_PROJECT_ID: string;
-  /** Base URL of this server, e.g. https://chatbot.anshuljain.net */
+  /** Base URL of this server, e.g. https://chatbot.example.com */
   PUBLIC_URL: string;
   /** Cloudflare Access team domain (e.g. "myteam.cloudflareaccess.com") and the app's AUD tag. */
   ACCESS_TEAM_DOMAIN: string;

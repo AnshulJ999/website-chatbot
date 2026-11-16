@@ -711,14 +711,17 @@ async function main(): Promise<void> {
       if ((flag("--prune") || live) && stale.length > pruneLimit && !force) {
         warnings.push(`${stale.length} files are no longer on the site; not removed (more than ${pruneLimit}; check them, then run with --force): ${stale.slice(0, 8).join(", ")}`);
       } else if (flag("--prune") || live) {
+        const failed: string[] = [];
         for (const p of stale) {
-          const r = await omnara("DELETE", `/memory-stores/${store}/file?path=${encodeURIComponent(p)}`);
+          let r = await omnara("DELETE", `/memory-stores/${store}/file?path=${encodeURIComponent(p)}`);
           if (r.status === 409) {
             const cur = (r.data as { current_digest?: string }).current_digest;
-            if (cur) await omnara("DELETE", `/memory-stores/${store}/file?path=${encodeURIComponent(p)}&expected_digest=${encodeURIComponent(cur)}`);
+            if (cur) r = await omnara("DELETE", `/memory-stores/${store}/file?path=${encodeURIComponent(p)}&expected_digest=${encodeURIComponent(cur)}`);
           }
+          if (r.status >= 300 && r.status !== 404) failed.push(`${p} (HTTP ${r.status})`);
         }
-        console.log(`removed ${stale.length} files no longer in the site: ${stale.join(", ")}`);
+        console.log(`removed ${stale.length - failed.length} files no longer in the site: ${stale.filter((p) => !failed.some((f) => f.startsWith(`${p} `))).join(", ")}`);
+        if (failed.length) warnings.push(`${failed.length} file(s) no longer on the site couldn't be removed from the store: ${failed.slice(0, 8).join(", ")}`);
       } else {
         console.log(`${stale.length} files in the store are no longer in the site (run with --prune to remove):`);
         for (const p of stale) console.log(`  ${p}`);

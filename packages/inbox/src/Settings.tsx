@@ -1,5 +1,5 @@
 import { ArrowDown, ArrowUp, Plus, Trash2 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { LimitAction, ModelTier, Settings as SettingsT, VisitorLabel } from "@website-chatbot/shared";
 import { api, type Overview } from "./api";
 import { Badge, Button, Card, Toggle } from "./ui";
@@ -13,8 +13,12 @@ export function Settings({ overview, onSave }: { overview: Overview; onSave: (p:
   const [draft, setDraft] = useState<SettingsT>(overview.settings);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const server = useRef(overview.settings);
+  // The inbox refreshes every minute: take the server's values only while nothing is being edited.
   useEffect(() => {
-    setDraft(overview.settings);
+    const before = JSON.stringify(server.current);
+    server.current = overview.settings;
+    setDraft((d) => (JSON.stringify(d) === before ? overview.settings : d));
   }, [overview.settings]);
 
   const dirty = JSON.stringify(draft) !== JSON.stringify(overview.settings);
@@ -101,6 +105,9 @@ export function Settings({ overview, onSave }: { overview: Overview; onSave: (p:
         <Card title="Limits and timing">
           <div className="grid gap-4 sm:grid-cols-2">
             <Num label="Messages per visitor per day" value={draft.perVisitorDailyMessages} onChange={(v) => set("perVisitorDailyMessages", v)} />
+            <Num label="Messages a visitor can leave per day (including chats they email themselves)" value={draft.visitorMessagesPerDay} onChange={(v) => set("visitorMessagesPerDay", v)} />
+            <Num label="Emails to visitors per day, all sites (confirmations and emailed chats)" value={draft.visitorEmailsPerDay} onChange={(v) => set("visitorEmailsPerDay", v)} />
+            <Num label={'"Wants you" alerts for one chat at most every (minutes)'} value={draft.wantsYouAlertEveryMin} onChange={(v) => set("wantsYouAlertEveryMin", v)} />
             <Num label="Longest visitor message (characters)" value={draft.maxMessageChars} step={100} onChange={(v) => set("maxMessageChars", v)} />
             <Num label="Try the next model after this much total silence (seconds)" value={draft.stallTimeoutSec} onChange={(v) => set("stallTimeoutSec", v)} />
             <Num label="Longest one model may take on an answer (seconds)" value={draft.modelTimeoutSec} onChange={(v) => set("modelTimeoutSec", v)} />

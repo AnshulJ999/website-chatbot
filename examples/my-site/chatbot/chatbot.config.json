@@ -1,0 +1,37 @@
+{
+  "site": {
+    "key": "my-site",
+    "name": "My Site",
+    "assistantName": "My Site Assistant",
+    "ownerName": "Sam",
+    "talkLabel": "Talk to a person",
+    "greeting": "Hi! I'm an AI assistant that answers from this site's pages. What would you like to know?",
+    "starters": [
+      { "path": "/", "prompts": ["What do you offer?", "How much does it cost?", "How do I get started?", "Can I talk to someone?"] },
+      { "path": "/pricing", "prompts": ["What's included in each plan?", "Is there a free trial?", "Can I get a refund?"] }
+    ],
+    "contactEmail": "hello@example.com",
+    "contactUrl": "https://example.com/contact",
+    "privacyUrl": "https://example.com/privacy",
+    "noticeText": "Chats are saved so we can read and reply.",
+    "theme": {
+      "background": "var(--background)",
+      "foreground": "var(--foreground)",
+      "accent": "var(--primary)",
+      "accentForeground": "var(--primary-foreground)"
+    },
+    "ui": {},
+    "proactive": { "enabled": true, "delaySec": 8, "text": "Questions? Ask here." },
+    "credit": { "text": "This chat is open source", "url": "https://github.com/AnshulJ999/website-chatbot" },
+    "aboutChat": "",
+    "origins": ["https://example.com", "http://localhost:3000"],
+    "storeName": "website-chatbot-my-site",
+    "tools": ["save_enquiry", "request_owner"],
+    "ownerEmail": "hello@example.com",
+    "emailFrom": "My Site <chat@example.com>"
+  },
+  "instructionFile": "instruction.md",
+  "knowledgeSource": "both",
+  "sources": [{ "type": "sitemap", "sitemap": "https://example.com/sitemap.xml", "storePath": "pages" }],
+  "curatedDir": "knowledge"
+}

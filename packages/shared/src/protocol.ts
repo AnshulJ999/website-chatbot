@@ -44,6 +44,8 @@ export type ClientMsg =
   | { t: "contact"; name: string; email: string; message: string }
   | { t: "email_transcript"; email: string }
   | { t: "page"; url: string; title: string }
+  /** "Try the assistant again" on the contact form shown after a failed answer. */
+  | { t: "retry_ai" }
   | { t: "ping" };
 
 /** Inbox -> ChatRoom (owner socket) */
@@ -51,6 +53,8 @@ export type OwnerMsg =
   | { t: "owner_send"; id: string; text: string; email: boolean }
   | { t: "owner_join" }
   | { t: "owner_hand_back" }
+  /** Clears "Waiting for you" without replying. */
+  | { t: "owner_done" }
   | { t: "ping" };
 
 /** ChatRoom -> both sockets */
@@ -165,4 +169,4 @@ export interface Enquiry {
   createdAt: number;
 }
 
-export type AnalyticsEvent = "opened" | "first_message" | "enquiry_sent" | "talked_to_owner" | "suggestion_clicked" | "starter_clicked";
+export type AnalyticsEvent = "opened" | "auto_opened" | "first_message" | "enquiry_sent" | "talked_to_owner" | "suggestion_clicked" | "starter_clicked";

@@ -1,6 +1,6 @@
 import type { PublicSiteConfig, ThemeMap } from "@website-chatbot/shared";
 import { applyTheme } from "../src/theme";
-import { OWNER_NAMES, TALK_WORDING } from "../src/dev-wording";
+import { chatDesignRows } from "../src/design-rows";
 
 // The Playground: the real widget on a plain page. Left panel = test setup (data-pg-* on <html>);
 // Design menu = look choices (data-d-*). Optional review tools (Notes, Design menu) load from a notes
@@ -80,7 +80,14 @@ const STATES = [
   opt("emailing", "Email me this chat"),
   opt("past", "Past chats"),
 ];
-const SCENARIOS = [opt("none", "Normal"), opt("fail_first", "First model fails"), opt("slow", "Reply stalls"), opt("omnara_down", "Omnara down"), opt("cap", "Chat over its cap")];
+const SCENARIOS = [
+  opt("none", "Normal"),
+  opt("table", "Slow answer with a table"),
+  opt("fail_first", "First model fails"),
+  opt("slow", "Reply stalls"),
+  opt("omnara_down", "Omnara down"),
+  opt("cap", "Chat over its cap"),
+];
 const CPU_TESTS = [opt("0", "Off"), opt("50", "About 50 ms"), opt("200", "About 200 ms"), opt("1000", "About 1 s")];
 const CUTOFF_TESTS = [opt("0", "Off"), opt("1", "Cut off mid-answer")];
 const MODELS = [
@@ -92,41 +99,6 @@ const MODELS = [
 ];
 const EFFORTS = [opt("high", "High"), opt("medium", "Medium"), opt("low", "Low"), opt("none", "None"), opt("", "Model's default")];
 
-const capFirst = (t: string) => t.charAt(0).toUpperCase() + t.slice(1);
-
-/** A wording row whose default is the site's own value, shown by name rather than as "site setting". */
-function wordingRow(key: string, label: string, note: string, table: Record<string, string>, current: string | undefined) {
-  const options = Object.entries(table).map(([id, text]) => opt(id, capFirst(text)));
-  const match = Object.entries(table).find(([, text]) => text.toLowerCase() === current?.toLowerCase())?.[0];
-  if (!match && current) options.unshift(opt("site", capFirst(current)));
-  return { key, label, note, options, fallback: match ?? "site" };
-}
-
-// Look choices only: the test setup lives in the panel. Defaults come from the site's config.
-function designRows() {
-  const cfg = siteConfig;
-  const delays = ["3", "6", "10", "30"];
-  const delay = String(cfg?.proactive.delaySec ?? 6);
-  if (!delays.includes(delay)) delays.push(delay);
-  return [
-    ...BASE_ROWS,
-    wordingRow("talkword", "\"Talk to\" wording", "Shows in the bar, menu or above the message box.", TALK_WORDING, cfg?.talkLabel),
-    wordingRow("owner", "What the bot calls you", "Shows in the \"asked to join\", \"is here\", away-form, message-sent and offline texts, and in the AI's replies. Starts a new chat when changed.", OWNER_NAMES, cfg?.ownerName),
-    { key: "greeting", label: "Pop-up greeting", note: "A small bubble above the closed chat button. Shows only while the chat is closed and empty.", options: [opt("off", "Off"), opt("on", "On")], fallback: cfg?.proactive.enabled ? "on" : "off" },
-    { key: "greetdelay", label: "Greeting delay", note: "Seconds after the page loads.", options: delays.map((s) => opt(s, `${s} seconds`)), fallback: delay },
-    { key: "greetrepeat", label: "Greeting shows", note: "How often one visitor sees it. New visitor in the panel resets it.", options: [opt("session", "Once per tab"), opt("day", "Once a day"), opt("page", "Every page load")], fallback: cfg?.proactive.repeat ?? "session" },
-  ];
-}
-
-const BASE_ROWS = [
-  { key: "launcher", label: "Launcher", options: [opt("icon", "Round icon"), opt("pill", "Pill with name")], fallback: "icon" },
-  { key: "corner", label: "Corner", options: [opt("right", "Bottom right"), opt("left", "Bottom left")], fallback: "right" },
-  { key: "panel", label: "Panel size", options: [opt("compact", "Compact"), opt("tall", "Tall"), opt("sheet", "Side sheet")], fallback: "compact" },
-  { key: "suggestions", label: "Suggested replies", options: [opt("chips", "Chips in a row"), opt("list", "Stacked list")], fallback: "chips" },
-  { key: "talk", label: "\"Talk to\" button", options: [opt("bar", "Bar under header"), opt("composer", "Above message box"), opt("menu", "Menu only")], fallback: "bar" },
-  { key: "notice", label: "\"Chats are saved\" notice", options: [opt("welcome", "Once, in welcome"), opt("under", "Under the box"), opt("menu", "Menu only")], fallback: "welcome" },
-  { key: "actions", label: "Answer buttons (copy, rate)", options: [opt("hover", "On hover"), opt("always", "Always shown")], fallback: "hover" },
-];
 let DESIGN_ROWS: unknown[] = [];
 
 interface DesignApi {
@@ -291,7 +263,7 @@ async function loadSiteConfig(): Promise<void> {
 function resetVisitor(): void {
   try {
     for (const k of Object.keys(localStorage)) if (k.startsWith("wcb:")) localStorage.removeItem(k);
-    sessionStorage.removeItem("wcb:bubble");
+    for (const k of Object.keys(sessionStorage)) if (k.startsWith("wcb:")) sessionStorage.removeItem(k);
   } catch {
     // nothing stored
   }
@@ -462,7 +434,12 @@ async function bootWidget(): Promise<void> {
 async function main(): Promise<void> {
   applyPg();
   await loadSiteConfig();
-  DESIGN_ROWS = designRows();
+  // A fresh clone has none of the listed sites yet: use the built-in demo site.
+  if (!siteConfig && LOCAL && site() !== "demo") {
+    setPg("site", "demo", true);
+    await loadSiteConfig();
+  }
+  DESIGN_ROWS = chatDesignRows(siteConfig);
   if (NOTES) {
     try {
       loadCss(`${NOTES}/devnotes/design-widget.css`);

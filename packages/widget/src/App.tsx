@@ -1,9 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
-import { isEmail, renderMarkdown, startersFor, visiblePreview, type ChatMessage, type GetInTouchReason, type PublicSiteConfig } from "@website-chatbot/shared";
+import { isEmail, renderMarkdown, startersFor, tidyStreaming, visiblePreview, type ChatMessage, type GetInTouchReason, type PublicSiteConfig } from "@website-chatbot/shared";
 import { emit, type ChatClient, type PastChat } from "./client";
+import { autoOpenClosed } from "./greeting";
 import { Icon } from "./icons";
 
-import { currentPath, forced, live, notice, setView, site, ui, type View } from "./store";
+import { currentPath, forced, live, notice, patch, setView, site, ui, type View } from "./store";
 
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 const CLOSE_MS = 180;
@@ -23,6 +24,10 @@ export function App({ client }: { client: ChatClient }) {
   // The panel plays its closing animation before it unmounts.
   const close = () => {
     if (closing) return;
+    if (v.autoOpened) {
+      autoOpenClosed();
+      patch({ autoOpened: false });
+    }
     if (matchMedia("(prefers-reduced-motion: reduce)").matches) return setView({ open: false, menu: false });
     setClosing(true);
     setTimeout(() => {
@@ -89,10 +94,19 @@ function Panel({ client, site: s, v, closing, onClose }: { client: ChatClient; s
     if (!forced.value) client.markSeen();
   }, [client, v.messages.length]);
 
+  // Re-check the owner's status while the chat is open, so "Online now" can't go stale.
+  useEffect(() => {
+    if (forced.value) return;
+    void client.checkPresence();
+    const timer = setInterval(() => void client.checkPresence(), 60_000);
+    return () => clearInterval(timer);
+  }, [client]);
+
   const formReason: GetInTouchReason | null =
     v.conn === "unreachable" ? null : st.mode === "form" ? (st.reason ?? "ai_unavailable") : st.reason === "owner_away" && !v.formDismissed && !st.contactSent ? "owner_away" : null;
   const canType = v.conn !== "unreachable" && st.mode !== "form";
-  const talkVisible = st.mode === "ai" && !st.ownerJoined;
+  // Away with the "menu" style: the way to leave a message lives in the menu only.
+  const talkVisible = st.mode === "ai" && !st.ownerJoined && !(u.away === "menu" && !st.ownerOnline);
 
   return (
     <div class={`panel panel-${sheet ? "sheet" : u.panel} ${closing ? "closing" : ""}`} ref={panelRef} style={sizeStyle} role="dialog" aria-label={s.assistantName}>
@@ -103,7 +117,7 @@ function Panel({ client, site: s, v, closing, onClose }: { client: ChatClient; s
         <div class="head-title">
           <strong>{s.assistantName}</strong>
           <span class="head-sub">
-            {st.ownerJoined ? (
+            {st.ownerJoined && st.ownerOnline ? (
               <>
                 <span class="dot on" aria-hidden="true" />
                 {cap(s.ownerName)} is here
@@ -145,6 +159,13 @@ function Panel({ client, site: s, v, closing, onClose }: { client: ChatClient; s
           )}
         </>
       )}
+      {!past && u.credit === "footer" && s.credit?.text && (
+        <p class="credit">
+          <a href={s.credit.url} target="_blank" rel="noopener">
+            {s.credit.text}
+          </a>
+        </p>
+      )}
       {!past && u.notice === "under" && (
         <p class="notice-under">
           {s.noticeText}
@@ -164,6 +185,15 @@ function Panel({ client, site: s, v, closing, onClose }: { client: ChatClient; s
 
 function TalkBar({ client, site: s, v }: { client: ChatClient; site: PublicSiteConfig; v: View }) {
   const st = v.status;
+  if (!st.ownerOnline && ui.value.away === "link") {
+    return (
+      <div class="talkbar talkbar-quiet">
+        <button class="link-btn" onClick={() => client.talkToOwner()}>
+          Leave a message
+        </button>
+      </div>
+    );
+  }
   return (
     <div class="talkbar">
       <span class="talk-status">
@@ -179,10 +209,11 @@ function TalkBar({ client, site: s, v }: { client: ChatClient; site: PublicSiteC
 
 function TalkLink({ client, site: s, v }: { client: ChatClient; site: PublicSiteConfig; v: View }) {
   const st = v.status;
+  const quiet = !st.ownerOnline && ui.value.away === "link";
   return (
     <button class="link-btn talk-inline" disabled={st.wantsOwner && st.ownerOnline} onClick={() => client.talkToOwner()}>
-      <span class={`dot ${st.ownerOnline ? "on" : ""}`} aria-hidden="true" />
-      {st.wantsOwner && st.ownerOnline ? "Asked to join" : s.talkLabel}
+      {!quiet && <span class={`dot ${st.ownerOnline ? "on" : ""}`} aria-hidden="true" />}
+      {quiet ? "Leave a message" : st.wantsOwner && st.ownerOnline ? "Asked to join" : s.talkLabel}
     </button>
   );
 }
@@ -252,11 +283,16 @@ function Menu({ client, site: s, v, onPast }: { client: ChatClient; site: Public
           </button>
         </form>
       )}
-      {u.talkPlacement === "menu" && v.status.mode === "ai" && !v.status.ownerJoined && (
+      {(u.talkPlacement === "menu" || (u.away === "menu" && !v.status.ownerOnline)) && v.status.mode === "ai" && !v.status.ownerJoined && (
         <button role="menuitem" onClick={() => (close(), client.talkToOwner())}>
-          <Icon name="person" /> {s.talkLabel}
+          <Icon name="person" /> {v.status.ownerOnline || u.away === "status" ? s.talkLabel : "Leave a message"}
           {v.status.ownerOnline && <span class="menu-online">Online</span>}
         </button>
+      )}
+      {u.credit === "menu" && s.credit?.text && (
+        <a role="menuitem" href={s.credit.url} target="_blank" rel="noopener" onClick={close}>
+          <Icon name="info" /> {s.credit.text}
+        </a>
       )}
       {u.notice === "menu" && (
         <p class="menu-note">
@@ -279,7 +315,8 @@ function Messages({ client, site: s, v, formReason }: { client: ChatClient; site
   const st = v.status;
   const lastAi = [...v.messages].reverse().find((m) => m.role !== "system");
   const showSuggestions = lastAi?.role === "ai" && !st.busy && st.mode === "ai" && !formReason && !!lastAi.suggestions?.length;
-  const preview = v.preview ? visiblePreview(v.preview) : "";
+  const raw = v.preview ? visiblePreview(v.preview) : "";
+  const preview = u.stream === "tidy" ? tidyStreaming(raw) : raw;
 
   // Follow new content only while the visitor is at the bottom, so reading earlier text isn't interrupted.
   useLayoutEffect(() => {
@@ -299,7 +336,7 @@ function Messages({ client, site: s, v, formReason }: { client: ChatClient; site
       aria-live="polite"
     >
       {v.conn === "unreachable" ? (
-        <Unreachable site={s} />
+        <Unreachable site={s} client={client} />
       ) : (
         <>
           {v.loading && !v.messages.length ? <Loading /> : <Welcome client={client} site={s} v={v} />}
@@ -338,7 +375,12 @@ function Messages({ client, site: s, v, formReason }: { client: ChatClient; site
 function Welcome({ client, site: s, v }: { client: ChatClient; site: PublicSiteConfig; v: View }) {
   const u = ui.value;
   const hasChat = v.messages.some((m) => m.role === "visitor");
-  const starters = startersFor(s.starters, currentPath());
+  const [offset, setOffset] = useState(0);
+  const all = startersFor(s.starters, currentPath());
+  const count = Math.max(1, u.starters || 4);
+  // "More questions" walks through the page's list in order, wrapping round at the end.
+  const starters = all.length <= count ? all : Array.from({ length: count }, (_, i) => all[(offset + i) % all.length]!);
+  const layout = starters.length > 3 ? "list" : u.suggestions;
   return (
     <div class="welcome">
       <div class="msg ai" dangerouslySetInnerHTML={{ __html: renderMarkdown(s.greeting) }} />
@@ -353,7 +395,7 @@ function Welcome({ client, site: s, v }: { client: ChatClient; site: PublicSiteC
         </p>
       )}
       {!hasChat && v.status.mode === "ai" && starters.length > 0 && (
-        <div class={`suggestions suggestions-${u.suggestions} starters`}>
+        <div class={`suggestions suggestions-${layout} starters`}>
           {starters.map((t) => (
             <button
               key={t}
@@ -366,6 +408,11 @@ function Welcome({ client, site: s, v }: { client: ChatClient; site: PublicSiteC
               {t}
             </button>
           ))}
+          {u.moreStarters === "on" && all.length > count && (
+            <button class="link-btn more-starters" onClick={() => setOffset((o) => (o + count) % all.length)}>
+              More questions
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -517,6 +564,16 @@ function GetInTouch({ client, site: s, reason, v }: { client: ChatClient; site: 
             Back to chat
           </button>
         )}
+        {reason === "ai_unavailable" && (
+          <button type="button" class="link-btn" onClick={() => client.retryAi()}>
+            Try the assistant again
+          </button>
+        )}
+        {reason === "cap" && (
+          <button type="button" class="link-btn" onClick={() => void client.newChat()}>
+            Start new chat
+          </button>
+        )}
       </div>
     </form>
   );
@@ -534,11 +591,17 @@ function Sent({ site: s, email }: { site: PublicSiteConfig; email?: string }) {
   );
 }
 
-function Unreachable({ site: s }: { site: PublicSiteConfig }) {
+function Unreachable({ site: s, client }: { site: PublicSiteConfig; client: ChatClient }) {
   return (
     <div class="card offline">
       <strong>Chat isn't available right now</strong>
-      <p>You can still reach {s.ownerName} directly.</p>
+      <p>
+        You can still reach {s.ownerName} directly, or{" "}
+        <button type="button" class="link-btn" onClick={() => client.retryNow()}>
+          try again
+        </button>
+        .
+      </p>
       <a class="btn" href={`mailto:${s.contactEmail}`}>
         Email {s.contactEmail}
       </a>
@@ -563,9 +626,10 @@ function Composer({ client, v, talk }: { client: ChatClient; v: View; talk: prea
     el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
   }, [text]);
 
+  // A chat that opened by itself doesn't take focus from the page.
   useEffect(() => {
-    if (v.open && window.matchMedia("(pointer: fine)").matches) ref.current?.focus();
-  }, [v.open]);
+    if (v.open && !v.autoOpened && window.matchMedia("(pointer: fine)").matches) ref.current?.focus();
+  }, [v.open, v.autoOpened]);
 
   const submit = () => {
     const t = text.trim();

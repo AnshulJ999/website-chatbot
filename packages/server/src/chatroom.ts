@@ -158,6 +158,7 @@ export class ChatRoom extends DurableObject<Env> {
 
     const settings = await db.getSettings(this.env.DB);
     await this.refreshOnline(settings);
+    if (role === "visitor") await this.leaveFormIfClear(settings);
     this.sendTo(server, { t: "history", messages: this.messages(role === "owner"), status: this.status(settings) });
     if (role === "visitor") {
       if (init.location) this.st.location = init.location;
@@ -232,7 +233,9 @@ export class ChatRoom extends DurableObject<Env> {
       case "contact":
         return this.onContact(ws, msg.name, msg.email, msg.message, settings, site);
       case "email_transcript":
-        return this.onEmailTranscript(ws, msg.email, site);
+        return this.onEmailTranscript(ws, msg.email, settings, site);
+      case "retry_ai":
+        return this.leaveFormIfClear(settings);
       case "page":
         if (msg.url !== this.st.page) {
           this.st.page = msg.url.slice(0, 500);
@@ -260,7 +263,8 @@ export class ChatRoom extends DurableObject<Env> {
     }
     this.add({ id, role: "visitor", text, meta: { via: "widget" } });
 
-    if (count > settings.perVisitorDailyMessages) return this.toForm("limit", settings);
+    // The daily limit is on AI answers; a chat the owner is handling carries on.
+    if (count > settings.perVisitorDailyMessages && this.st.mode !== "owner") return this.toForm("limit", settings);
     if (first && settings.alertOnNewChat) {
       this.alert(site, {
         title: `${siteTag(site)} - ${this.label(settings)} - ${this.where()}`,
@@ -272,7 +276,8 @@ export class ChatRoom extends DurableObject<Env> {
     }
     if (this.st.mode === "owner") {
       this.st.handBack.push(`Visitor: ${text}`);
-      if (settings.handBackWhenAway && !this.online) return this.autoHandBack("away", settings, site);
+      // Away: back to the AI at once, unless the owner wrote here recently (then the quiet timer applies).
+      if (settings.handBackWhenAway && !this.online && !this.ownerWroteWithin(settings.handBackAfterMin)) return this.autoHandBack("away", settings, site);
       if (settings.handBackAfterMin > 0 && !this.st.handBackAt) this.st.handBackAt = Date.now() + settings.handBackAfterMin * 60_000;
       await this.save();
       await this.scheduleAlarm();
@@ -308,9 +313,9 @@ export class ChatRoom extends DurableObject<Env> {
           {
             title: `Chatbot - daily budget reached ($${settings.dailyBudgetUsd.toFixed(2)})`,
             lines: [
-              settings.budgetAction === "get_in_touch"
-                ? `💸 New answers get "Get in touch" until midnight UTC.`
-                : `💸 Answers use the free models until midnight UTC.`,
+              settings.budgetAction === "free_tier" && settings.ladder.some((t) => t.enabled && t.free)
+                ? `💸 Answers use the free models until midnight UTC.`
+                : `💸 New answers get "Get in touch" until midnight UTC.`,
             ],
             priority: 4,
             tags: ["money_with_wings"],
@@ -397,7 +402,7 @@ export class ChatRoom extends DurableObject<Env> {
             if (shown) {
               this.turn.model = tier.label;
               await this.keepPartial(shown, tier, site, text, failures);
-              outcome = "partial";
+              outcome = this.st.mode === "ai" ? "partial" : "owner";
               return;
             }
             this.broadcast({ t: "delta_reset" });
@@ -407,13 +412,18 @@ export class ChatRoom extends DurableObject<Env> {
           }
         }
       }
+      // The owner joined while the AI was failing: they answer instead.
+      if (this.st.mode !== "ai") {
+        outcome = "owner";
+        return;
+      }
       outcome = "form";
       await this.toForm("ai_unavailable", settings);
       await this.turnFailed(site, text, failures.length ? failures : ["no model answered in time"]);
     } catch (e) {
       console.error("answer", e);
       outcome = "form";
-      await this.toForm("ai_unavailable", settings);
+      if (this.st.mode === "ai") await this.toForm("ai_unavailable", settings);
       await this.turnFailed(site, text, [...failures, `server error: ${e instanceof Error ? e.message : String(e)}`]);
     } finally {
       this.recordTurn(site, outcome);
@@ -424,6 +434,8 @@ export class ChatRoom extends DurableObject<Env> {
   /** Ends an answer that stopped after the visitor saw part of it: keeps those words and offers the next step. */
   private async keepPartial(shown: string, tier: ModelTier, site: SiteConfig, question: string, failures: string[]): Promise<void> {
     this.add({ id: newId("m"), role: "ai", text: splitSuggestions(shown).text, meta: { model: tier.label, costUsd: 0 } });
+    // With the owner in the chat, the visitor needs no "ask again" line.
+    if (this.st.mode !== "ai") return;
     const talk = site.talkLabel.charAt(0).toLowerCase() + site.talkLabel.slice(1);
     this.add({ id: newId("m"), role: "system", text: `The answer stopped early. Ask again, or ${talk}.` });
     await db.logIncident(this.env.DB, { site: site.key, chatId: this.st.chatId, kind: "answer_partial", model: tier.model, detail: `${failures.join("; ")} | ${question.slice(0, 300)}` });
@@ -510,7 +522,7 @@ export class ChatRoom extends DurableObject<Env> {
         if (!tier || !brain.resume || !this.st.brain.agentId) throw new BrainFailure("error", "nothing to resume");
         if (this.st.recoveries > 2) throw new BrainFailure("error", "cut off again while recovering");
         const result = await this.runAttempt(brain, tier, `resume-${Date.now()}`, question, settings, site, deadline, true);
-        if (this.st.mode === "ai") await this.finishTurn(result.text, result.totalCostUsd, tier, site);
+        await this.finishTurn(result.text, result.totalCostUsd, tier, site);
       } catch (e) {
         console.error("recover", e);
         const why = e instanceof Error ? e.message : String(e);
@@ -553,7 +565,7 @@ export class ChatRoom extends DurableObject<Env> {
     this.alert(
       site,
       {
-        title: `Chatbot - ${failed.length} failed answers in 30 min`,
+        title: `Chatbot - ${rows.length} answers failed or cut off in 30 min`,
         lines: [
           causes.size ? `⚠️ ${[...causes].map(([f, n]) => `${f} ×${n}`).join(" · ")}` : "",
           cut ? `✂️ ${cut} answer${cut === 1 ? "" : "s"} cut off` : "",
@@ -664,12 +676,16 @@ export class ChatRoom extends DurableObject<Env> {
   /** Saves the finished answer; returns what this answer cost. */
   private async finishTurn(raw: string, totalCost: number, tier: ModelTier, site: SiteConfig): Promise<number> {
     const { text, suggestions } = splitSuggestions(raw);
-    const delta = Number.isFinite(totalCost) ? Math.max(0, totalCost - this.st.costUsd) : 0;
-    if (Number.isFinite(totalCost)) this.st.costUsd = Math.max(this.st.costUsd, totalCost);
+    // Omnara reports the agent's running total; a chat can have had several agents. Agents from before
+    // per-agent tracking have no total of their own, and the chat's total stands in for it.
+    const base = this.st.brain.agentCostUsd ?? this.st.costUsd;
+    const delta = Number.isFinite(totalCost) ? Math.max(0, totalCost - base) : 0;
+    if (Number.isFinite(totalCost)) this.st.brain.agentCostUsd = Math.max(base, totalCost);
+    this.st.costUsd += delta;
     this.st.pageChanged = false;
     this.add({ id: newId("m"), role: "ai", text, suggestions, meta: { model: tier.label, costUsd: delta } });
     await db.addSpend(this.env.DB, site.key, delta);
-    this.index({ cost_usd: this.st.costUsd, model: tier.label, agent_id: this.st.brain.agentId ?? null });
+    this.index({ cost_usd: this.st.costUsd, model: tier.label, agent_id: this.st.brain.agentId ?? null, agent_archived: 0 });
     return delta;
   }
 
@@ -702,11 +718,12 @@ export class ChatRoom extends DurableObject<Env> {
         return { ok: true, value: { ownerOnline: online, note: online ? "The owner was alerted and can join this chat." : "The owner is offline; the visitor now sees a form to leave their email." } };
       }
       case "save_enquiry": {
-        const name = String(input.name ?? "").trim();
-        const email = String(input.email ?? "").trim();
-        const message = String(input.message ?? "").trim();
+        const name = String(input.name ?? "").trim().slice(0, 200);
+        const email = String(input.email ?? "").trim().slice(0, 254);
+        const message = String(input.message ?? "").trim().slice(0, 5000);
         if (!name || !isEmail(email) || !message) return { ok: false, value: "A name, a valid email address and a message are all required." };
-        await this.saveEnquiry(name, email, message, site, "the AI");
+        if (!(await this.allowVisitorMessage(settings))) return { ok: false, value: `This visitor has already left several messages today. Suggest emailing ${site.contactEmail} instead.` };
+        await this.saveEnquiry(name, email, message, settings, site, "the AI");
         return { ok: true, value: { saved: true, note: `${site.ownerName} will reply by email.` } };
       }
       case "get_latest_release":
@@ -726,6 +743,8 @@ export class ChatRoom extends DurableObject<Env> {
     await this.save();
     this.index({ wants_owner: 1 });
     this.broadcastStatus(settings);
+    // Pressing the button again and again sends one alert per cool-down.
+    if (!(await db.alertDue(this.env.DB, `wants:${this.st.chatId}`, settings.wantsYouAlertEveryMin * 60_000))) return online;
     const lastQuestion = this.rows("WHERE role = 'visitor' ORDER BY seq DESC LIMIT 1")[0]?.text;
     this.alert(site, {
       title: `${siteTag(site)} - Wants you - ${this.who(settings)}`,
@@ -747,9 +766,8 @@ export class ChatRoom extends DurableObject<Env> {
     const settings = await db.getSettings(this.env.DB);
     const site = await this.site();
     await this.refreshOnline(settings);
+    // An answer in progress still finishes; from here the chat is the owner's.
     if (msg.t === "owner_join" || (msg.t === "owner_send" && this.st.mode !== "owner")) {
-      this.abort?.abort();
-      await this.brain().cancel(this.st.brain);
       this.st.mode = "owner";
       this.st.ownerJoined = true;
       this.st.reason = undefined;
@@ -772,12 +790,14 @@ export class ChatRoom extends DurableObject<Env> {
       this.st.handBack.push(`Owner: ${text}`);
       this.st.handBackAt = undefined;
       this.st.wantsOwner = false;
-      await db.markEnquiriesReplied(this.env.DB, this.st.chatId);
+      if (await db.markEnquiriesReplied(this.env.DB, this.st.chatId)) void this.hub().enquiry("");
     }
+    if (msg.t === "owner_done") this.st.wantsOwner = false;
     if (msg.t === "owner_hand_back" && this.st.mode === "owner") {
       this.st.mode = "ai";
       this.st.ownerJoined = false;
       this.st.handBackAt = undefined;
+      this.st.wantsOwner = false;
       this.add({ id: newId("m"), role: "system", text: `${cap(site.ownerName)} has left the chat. You're chatting with the AI assistant.` });
     }
     await this.save();
@@ -820,14 +840,17 @@ export class ChatRoom extends DurableObject<Env> {
     message = message.trim().slice(0, 5000);
     if (!isEmail(email) || !message) return this.sendTo(ws, { t: "error", code: "contact_invalid", text: "Please add a valid email and a message." });
     if (this.st.contactSent && this.st.visitorEmail === email && this.messages(false).some((m) => m.text === message)) return;
+    if (!(await this.allowVisitorMessage(settings))) {
+      return this.sendTo(ws, { t: "error", code: "contact_limit", text: `You've already sent a few messages today. You can also email ${site.contactEmail}.` });
+    }
     this.add({ id: newId("m"), role: "visitor", text: message, meta: { via: "widget" } });
-    await this.saveEnquiry(name, email, message, site, "the form");
+    await this.saveEnquiry(name, email, message, settings, site, "the form");
     if (this.st.reason === "owner_away" || this.st.reason === "asked") this.st.reason = undefined;
     await this.save();
     this.broadcastStatus(settings);
   }
 
-  private async saveEnquiry(name: string, email: string, message: string, site: SiteConfig, via: string): Promise<void> {
+  private async saveEnquiry(name: string, email: string, message: string, settings: Settings, site: SiteConfig, via: string): Promise<void> {
     const id = newId("e");
     await db.insertEnquiry(this.env.DB, { id, chatId: this.st.chatId, site: site.key, name, email, message, status: "new", createdAt: Date.now() });
     await db.setVisitorContact(this.env.DB, this.st.visitorId, name || null, email);
@@ -864,6 +887,7 @@ export class ChatRoom extends DurableObject<Env> {
       text: `${name} <${email}> (via ${via}):\n\n${message}\n\nOpen the chat: ${link}`,
       replyTo: email,
     });
+    if (!(await this.allowVisitorEmail(settings, site))) return;
     void this.mail(site, {
       from: site.emailFrom,
       to: email,
@@ -873,9 +897,11 @@ export class ChatRoom extends DurableObject<Env> {
     });
   }
 
-  private async onEmailTranscript(ws: WebSocket, email: string, site: SiteConfig): Promise<void> {
+  private async onEmailTranscript(ws: WebSocket, email: string, settings: Settings, site: SiteConfig): Promise<void> {
     if (!isEmail(email)) return this.sendTo(ws, { t: "error", code: "email_invalid", text: "That email address doesn't look right." });
     if (this.st.transcriptsSent >= 3) return this.sendTo(ws, { t: "error", code: "transcript_limit", text: "This chat was already emailed a few times." });
+    if (!(await this.allowVisitorMessage(settings))) return this.sendTo(ws, { t: "error", code: "transcript_limit", text: "That's the limit for emailed chats today." });
+    if (!(await this.allowVisitorEmail(settings, site))) return this.sendTo(ws, { t: "error", code: "transcript_failed", text: "Couldn't send the email. Please try again tomorrow." });
     this.st.transcriptsSent++;
     await this.save();
     const body = this.messages(false)
@@ -894,21 +920,23 @@ export class ChatRoom extends DurableObject<Env> {
 
   // ---------- RPC from the Worker ----------
 
-  /** A visitor replied to one of our emails. */
-  async emailReply(from: string, text: string): Promise<void> {
+  /** A visitor replied to one of our emails. `emailId` makes a repeated delivery of the same email a no-op. */
+  async emailReply(from: string, text: string, emailId?: string): Promise<void> {
     if (!this.st) return;
+    const id = emailId ? `m_mail_${emailId}` : newId("m");
+    if (this.message(id)) return;
     const site = await this.site();
-    this.add({ id: newId("m"), role: "visitor", text: text.slice(0, 10_000), meta: { via: "email" } });
+    const address = (/<([^>]+)>/.exec(from)?.[1] ?? from).trim();
+    this.add({ id, role: "visitor", text: text.slice(0, 10_000), meta: { via: "email" } });
     if (this.st.mode !== "owner") {
       this.st.mode = "owner";
       this.st.ownerJoined = true;
     }
     this.st.wantsOwner = true;
-    if (!this.st.visitorEmail) this.st.visitorEmail = from;
+    if (!this.st.visitorEmail) this.st.visitorEmail = address;
     await this.save();
     this.index({ mode: this.st.mode, wants_owner: 1 });
     this.broadcastStatus(await db.getSettings(this.env.DB));
-    const address = /<([^>]+)>/.exec(from)?.[1] ?? from;
     this.alert(site, {
       title: `${siteTag(site)} - Email reply from ${this.st.visitorName || address}`,
       lines: [`💬 ${quote(text, 300)}`, `✉️ ${address}`],
@@ -919,6 +947,15 @@ export class ChatRoom extends DurableObject<Env> {
         { label: "Reply", url: `mailto:${address}` },
       ],
     });
+  }
+
+  /** Clears "Waiting for you" from the inbox: the chat's message was marked done or the chat archived. */
+  async clearWaiting(): Promise<void> {
+    if (!this.st) return;
+    this.st.wantsOwner = false;
+    await this.save();
+    this.index({ wants_owner: 0 });
+    this.broadcastStatus(await db.getSettings(this.env.DB));
   }
 
   async transcript(): Promise<ChatMessage[]> {
@@ -999,6 +1036,54 @@ export class ChatRoom extends DurableObject<Env> {
     if (!s) throw new Error(`unknown site ${this.st.site}`);
     // Playground: compare what the bot calls the owner.
     return this.st.dev?.ownerName ? { ...s, ownerName: this.st.dev.ownerName } : s;
+  }
+
+  /** Ends a contact-form chat once its cause is gone: a failed answer (the next try may work), AI back on, budget or daily limit reset. A chat over its own cost cap stays a form. */
+  private async leaveFormIfClear(settings: Settings): Promise<void> {
+    if (this.st.mode !== "form") return;
+    const r = this.st.reason;
+    const clear =
+      r === "ai_unavailable" ||
+      (r === "ai_off" && settings.aiEnabled) ||
+      (r === "budget" && (await db.spendToday(this.env.DB)) < settings.dailyBudgetUsd) ||
+      (r === "limit" && (await db.visitorMessagesToday(this.env.DB, this.st.visitorId)) < settings.perVisitorDailyMessages);
+    if (!clear) return;
+    this.st.mode = "ai";
+    this.st.reason = undefined;
+    await this.save();
+    this.index({ mode: "ai" });
+    this.broadcastStatus(settings);
+  }
+
+  /** Counts one message left (or chat emailed) by this visitor today; false past the day's limit. */
+  private async allowVisitorMessage(settings: Settings): Promise<boolean> {
+    return (await db.bumpDaily(this.env.DB, `leave:${this.st.visitorId}`)) <= settings.visitorMessagesPerDay;
+  }
+
+  /** Counts one email to a visitor, across all sites; false past the day's limit (logged, one alert a day). */
+  private async allowVisitorEmail(settings: Settings, site: SiteConfig): Promise<boolean> {
+    if ((await db.bumpDaily(this.env.DB, "visitor-emails")) <= settings.visitorEmailsPerDay) return true;
+    await this.incidentNow(site, "mail_capped", `daily limit of ${settings.visitorEmailsPerDay} emails to visitors reached`);
+    if (await db.alertDue(this.env.DB, `mail-cap:${db.today()}`, 86_400_000)) {
+      this.alert(
+        site,
+        {
+          title: `Chatbot - emails to visitors stopped for today`,
+          lines: [`✉️ ${settings.visitorEmailsPerDay} sent today, the daily limit. Messages are still saved and you still get alerts.`],
+          priority: 3,
+          tags: ["envelope"],
+          actions: [{ label: "Open settings", url: settingsLink(this.env) }],
+        },
+        true,
+      );
+    }
+    return false;
+  }
+
+  private ownerWroteWithin(minutes: number): boolean {
+    if (minutes <= 0) return false;
+    const last = this.ctx.storage.sql.exec<{ at: number | null }>("SELECT MAX(at) AS at FROM messages WHERE role = 'owner'").one().at ?? 0;
+    return Date.now() - last < minutes * 60_000;
   }
 
   private async refreshOnline(settings: Settings): Promise<void> {

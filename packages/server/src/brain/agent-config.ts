@@ -3,8 +3,17 @@ import BASE_RULES from "./base-rules.md";
 
 /** Rules every site's agent gets, ahead of the site's own instruction (base-rules.md, {{placeholders}} filled per site). */
 export function baseRules(site: SiteConfig): string {
-  const vars: Record<string, string> = { assistantName: site.assistantName, siteName: site.name, ownerName: site.ownerName, storeName: site.storeName };
-  return BASE_RULES.trim().replace(/\{\{(\w+)\}\}/g, (m, k: string) => vars[k] ?? m);
+  const about = site.aboutChat?.trim();
+  const vars: Record<string, string> = {
+    assistantName: site.assistantName,
+    siteName: site.name,
+    ownerName: site.ownerName,
+    storeName: site.storeName,
+    aboutChat: about ? `\nIf asked how this chat assistant was built, you can say: ${about}` : "",
+  };
+  return BASE_RULES.trim()
+    .replace(/\{\{(\w+)\}\}/g, (m, k: string) => vars[k] ?? m)
+    .replace(/\n{3,}/g, "\n\n");
 }
 
 const TOOL_DEFS: Record<ToolName, { description: string; input_schema: Record<string, unknown> }> = {

@@ -1,50 +1,92 @@
-// Playground-only: applies the Design menu's look choices (data-d-* on <html>) and the Playground
-// panel's test setup (data-pg-*). Never part of the production widget bundle.
+// Design menu hooks: applies the look choices (data-d-* on <html> in the Playground, data-chat-* on a site's
+// dev pages) and, in the Playground only, the panel's test setup (data-pg-*). Never in the visitor widget.
 import { DEFAULT_UI, type ChatMessage, type ChatStatus, type GreetingRepeat, type PublicSiteConfig, type WidgetUi } from "@website-chatbot/shared";
 import type { ChatClient } from "./client";
-import { greetingDue, greetingShown } from "./greeting";
+import { autoOpenDue, canAutoOpen, greetingDue, greetingShown, watchAutoOpen } from "./greeting";
 import type { WidgetOptions } from "./main";
-import { OWNER_NAMES, TALK_WORDING } from "./dev-wording";
+import { chatDesignRows } from "./design-rows";
+import { CREDIT_WORDING, OWNER_NAMES, TALK_WORDING } from "./dev-wording";
 import { EMPTY_STATUS, forced, live, pageOverride, patch, site, ui, type View } from "./store";
 
-let base: Pick<PublicSiteConfig, "talkLabel" | "ownerName" | "proactive"> | null = null;
+let base: Pick<PublicSiteConfig, "talkLabel" | "ownerName" | "proactive" | "credit"> | null = null;
 let lastDev = "";
+let lastGreeting = "";
+let lastSite = "";
 let bubbleTimer = 0;
+let stopAutoOpen: (() => void) | undefined;
+
+const PROJECT_URL = "https://github.com/AnshulJ999/website-chatbot";
+/** The Playground's own Design menu uses data-d-*; on a site the chat's rows sit in the site's menu as data-chat-*. */
+const PREFIX = __WCB_PLAYGROUND__ ? "data-d-" : "data-chat-";
 
 export function initDev(_host: HTMLElement, opts: WidgetOptions, client: ChatClient): void {
+  // On a site's dev page: offer the chat's rows to the site's Design menu, with the site's config as defaults.
+  if (!__WCB_PLAYGROUND__) {
+    (window as Window & { WebsiteChatbotDesign?: unknown }).WebsiteChatbotDesign = { rows: chatDesignRows(site.value, true) };
+    window.dispatchEvent(new Event("website-chatbot-design"));
+  }
   const apply = () => {
     const d = document.documentElement.dataset;
+    const v = (key: string) => document.documentElement.getAttribute(PREFIX + key) ?? undefined;
     const pick = <K extends keyof WidgetUi>(key: K, value: string | undefined) => (value ?? opts.ui?.[key] ?? site.value?.ui[key] ?? DEFAULT_UI[key]) as WidgetUi[K];
     ui.value = {
-      launcher: pick("launcher", d.dLauncher),
-      corner: pick("corner", d.dCorner),
-      panel: pick("panel", d.dPanel),
-      suggestions: pick("suggestions", d.dSuggestions),
-      talkPlacement: pick("talkPlacement", d.dTalk),
-      notice: pick("notice", d.dNotice),
-      actions: pick("actions", d.dActions),
+      launcher: pick("launcher", v("launcher")),
+      corner: pick("corner", v("corner")),
+      panel: pick("panel", v("panel")),
+      suggestions: pick("suggestions", v("suggestions")),
+      talkPlacement: pick("talkPlacement", v("talk")),
+      notice: pick("notice", v("notice")),
+      actions: pick("actions", v("actions")),
+      away: pick("away", v("away")),
+      stream: pick("stream", v("stream")),
+      starters: Number(v("starters")) || pick("starters", undefined),
+      moreStarters: pick("moreStarters", v("morestarters")),
+      credit: pick("credit", v("credit")),
     };
 
-    const ownerName = d.dOwner && OWNER_NAMES[d.dOwner];
+    const owner = v("owner");
+    const ownerName = owner && OWNER_NAMES[owner];
     if (site.value) {
-      base ??= { talkLabel: site.value.talkLabel, ownerName: site.value.ownerName, proactive: site.value.proactive };
-      const talkLabel = (d.dTalkword && TALK_WORDING[d.dTalkword]) || base.talkLabel;
-      const greetOn = d.dGreeting ? d.dGreeting === "on" : base.proactive.enabled;
-      const delaySec = Number(d.dGreetdelay) || base.proactive.delaySec;
-      const repeat = (d.dGreetrepeat ?? base.proactive.repeat ?? "session") as GreetingRepeat;
-      const proactive = { ...base.proactive, enabled: greetOn, delaySec, repeat, text: base.proactive.text || `Questions about ${site.value.name}? Ask here.` };
-      const next = { ...site.value, talkLabel, ownerName: ownerName || base.ownerName, proactive };
-      const p = site.value.proactive;
-      if (next.talkLabel !== site.value.talkLabel || next.ownerName !== site.value.ownerName || p.enabled !== greetOn || p.delaySec !== delaySec || p.repeat !== repeat || p.text !== proactive.text) site.value = next;
-      clearTimeout(bubbleTimer);
-      if (greetOn && !live.value.open && !live.value.messages.length && greetingDue(repeat))
-        bubbleTimer = window.setTimeout(() => {
-          patch({ bubble: true });
-          greetingShown();
-        }, delaySec * 1000);
-      else if (!greetOn) patch({ bubble: false });
+      base ??= { talkLabel: site.value.talkLabel, ownerName: site.value.ownerName, proactive: site.value.proactive, credit: site.value.credit };
+      const talkword = v("talkword");
+      const talkLabel = (talkword && TALK_WORDING[talkword]) || base.talkLabel;
+      const greetOn = v("greeting") ? v("greeting") === "on" : base.proactive.enabled;
+      const delaySec = Number(v("greetdelay")) || base.proactive.delaySec;
+      const repeat = (v("greetrepeat") ?? base.proactive.repeat ?? "session") as GreetingRepeat;
+      const style = (v("greetstyle") ?? base.proactive.style ?? "bubble") as "bubble" | "open";
+      const openAfterSec = Number(v("openafter")) || base.proactive.openAfterSec || 45;
+      const proactive = { ...base.proactive, enabled: greetOn, delaySec, repeat, style, openAfterSec, text: base.proactive.text || `Questions about ${site.value.name}? Ask here.` };
+      const creditword = v("creditword");
+      const creditText = (creditword && CREDIT_WORDING[creditword]) || base.credit?.text || CREDIT_WORDING.isopen!;
+      const credit = { text: creditText, url: base.credit?.url || PROJECT_URL };
+      const next = { ...site.value, talkLabel, ownerName: ownerName || base.ownerName, proactive, credit };
+      const changed = (x: PublicSiteConfig) => JSON.stringify([x.talkLabel, x.ownerName, x.proactive, x.credit]);
+      lastSite = changed(next);
+      if (lastSite !== changed(site.value)) site.value = next;
+
+      // Re-arm the greeting only when one of its rows changed.
+      const greeting = JSON.stringify(proactive);
+      if (greeting !== lastGreeting) {
+        lastGreeting = greeting;
+        clearTimeout(bubbleTimer);
+        stopAutoOpen?.();
+        stopAutoOpen = undefined;
+        if (!greetOn) patch({ bubble: false });
+        else if (!live.value.open && !live.value.messages.length) {
+          // The Playground has nothing to scroll, so the "open" greeting waits for time only there.
+          if (style === "open" && canAutoOpen()) {
+            if (autoOpenDue()) stopAutoOpen = watchAutoOpen(next, 1, !__WCB_PLAYGROUND__);
+          } else if (greetingDue(repeat)) {
+            bubbleTimer = window.setTimeout(() => {
+              patch({ bubble: true });
+              greetingShown();
+            }, delaySec * 1000);
+          }
+        }
+      }
     }
 
+    if (!__WCB_PLAYGROUND__) return;
     pageOverride.value = d.pgPage || null;
     const state = d.pgState ?? "live";
     forced.value = state === "live" ? null : sample(state);
@@ -67,6 +109,10 @@ export function initDev(_host: HTMLElement, opts: WidgetOptions, client: ChatCli
   apply();
   window.addEventListener("design-change", apply);
   window.addEventListener("pg-change", apply);
+  // Starting a chat brings the server's copy of the site; put the Design choices back on it.
+  site.subscribe((s) => {
+    if (s && base && JSON.stringify([s.talkLabel, s.ownerName, s.proactive, s.credit]) !== lastSite) queueMicrotask(apply);
+  });
 }
 
 const t0 = Date.now() - 5 * 60_000;

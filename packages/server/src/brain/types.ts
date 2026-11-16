@@ -17,6 +17,10 @@ export interface BrainState {
   agentId?: string;
   lastSeq: number;
   model?: string;
+  /** Fingerprint of the config the agent last got; a change (rules, instructions, site brief) updates the agent. */
+  config?: string;
+  /** This agent's total cost so far; starts at 0 with each new agent. */
+  agentCostUsd?: number;
 }
 
 export interface TurnRequest {

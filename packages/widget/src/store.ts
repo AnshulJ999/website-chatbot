@@ -18,6 +18,8 @@ export interface View {
   formDismissed: boolean;
   /** A saved chat is on its way from the server and no local copy exists yet. */
   loading?: boolean;
+  /** The chat opened by itself (the "open" greeting); closing it keeps it shut for the day. */
+  autoOpened?: boolean;
   /** Playground samples only: show the Past chats screen with these, or the menu's email form. */
   samplePast?: { id: string; preview: string; updatedAt: number; ownerAt?: number }[];
   sampleEmailing?: boolean;

@@ -84,6 +84,28 @@ export async function countVisitorMessage(db: D1Database, visitorId: string): Pr
   return row?.msg_count ?? 1;
 }
 
+/** The visitor's message count for today, without adding to it. */
+export async function visitorMessagesToday(db: D1Database, visitorId: string): Promise<number> {
+  const row = await db.prepare("SELECT msg_count, msg_day FROM visitors WHERE id = ?").bind(visitorId).first<{ msg_count: number; msg_day: string | null }>();
+  return row && row.msg_day === today() ? row.msg_count : 0;
+}
+
+let countersReady = false;
+
+/** Adds one to a counter that starts again each UTC day; returns the new count. */
+export async function bumpDaily(db: D1Database, key: string): Promise<number> {
+  if (!countersReady) {
+    // Also in migration 0006; created here too so a deploy without the migration still works.
+    await db.prepare("CREATE TABLE IF NOT EXISTS counters (key TEXT PRIMARY KEY, day TEXT NOT NULL, n INTEGER NOT NULL)").run();
+    countersReady = true;
+  }
+  const row = await db
+    .prepare("INSERT INTO counters (key, day, n) VALUES (?1, ?2, 1) ON CONFLICT(key) DO UPDATE SET n = CASE WHEN day = ?2 THEN n + 1 ELSE 1 END, day = ?2 RETURNING n")
+    .bind(key, today())
+    .first<{ n: number }>();
+  return row?.n ?? 1;
+}
+
 export async function setVisitorContact(db: D1Database, visitorId: string, name: string | null, email: string | null): Promise<void> {
   await db
     .prepare("UPDATE visitors SET name = COALESCE(?2, name), email = COALESCE(?3, email) WHERE id = ?1")
@@ -272,12 +294,16 @@ export async function listEnquiries(db: D1Database, limit = 100): Promise<Enquir
   return results.map((r) => ({ id: r.id, chatId: r.chat_id, site: r.site, name: r.name, email: r.email, message: r.message, status: r.status, createdAt: r.created_at }));
 }
 
-export async function setEnquiryStatus(db: D1Database, id: string, status: Enquiry["status"]): Promise<void> {
-  await db.prepare("UPDATE enquiries SET status = ? WHERE id = ?").bind(status, id).run();
+/** Returns the message's chat, or null when no such message exists. */
+export async function setEnquiryStatus(db: D1Database, id: string, status: Enquiry["status"]): Promise<string | null> {
+  const row = await db.prepare("UPDATE enquiries SET status = ? WHERE id = ? RETURNING chat_id").bind(status, id).first<{ chat_id: string }>();
+  return row?.chat_id ?? null;
 }
 
-export async function markEnquiriesReplied(db: D1Database, chatId: string): Promise<void> {
-  await db.prepare("UPDATE enquiries SET status = 'replied' WHERE chat_id = ? AND status = 'new'").bind(chatId).run();
+/** Returns how many messages changed. */
+export async function markEnquiriesReplied(db: D1Database, chatId: string): Promise<number> {
+  const res = await db.prepare("UPDATE enquiries SET status = 'replied' WHERE chat_id = ? AND status = 'new'").bind(chatId).run();
+  return res.meta.changes ?? 0;
 }
 
 // Model health: failures across chats put a model on cooldown.
@@ -387,7 +413,7 @@ export async function answerStats(db: D1Database, since: number, withTest = true
 
 // Incidents: a durable log of failures, for alerts and later investigation.
 
-export type IncidentKind = "attempt_failed" | "turn_failed" | "turn_interrupted" | "answer_partial" | "alert_failed" | "mail_failed";
+export type IncidentKind = "attempt_failed" | "turn_failed" | "turn_interrupted" | "answer_partial" | "alert_failed" | "mail_failed" | "mail_capped" | "inbound_failed";
 
 export interface AnswerRecord {
   site: string;

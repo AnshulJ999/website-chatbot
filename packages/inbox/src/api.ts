@@ -38,7 +38,8 @@ export interface Stats {
 
 export const api = {
   overview: () => call<Overview>("GET", "/overview"),
-  chats: (filter: string, site: string) => call<ChatSummary[]>("GET", `/chats?filter=${filter}&site=${encodeURIComponent(site)}`),
+  /** One page of chats (50), newest first; `before` = the oldest `updatedAt` already shown. */
+  chats: (filter: string, site: string, before?: number) => call<ChatSummary[]>("GET", `/chats?filter=${filter}&site=${encodeURIComponent(site)}${before ? `&before=${before}` : ""}`),
   chat: (id: string) => call<ChatDetail>("GET", `/chats/${id}`),
   markRead: (id: string) => call("POST", `/chats/${id}/read`),
   settings: (patch: Partial<Settings>) => call<Settings>("PATCH", "/settings", patch),

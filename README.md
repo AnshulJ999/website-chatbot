@@ -30,8 +30,10 @@ An AI chat widget for your website that answers from your own pages, hands visit
 **Reliability**
 
 - A model ladder: if the main model goes silent (15 s) or takes too long (30 s), the next one answers. Visitors never wait more than 45 s. Words already shown are kept.
-- If every model fails or a spending limit is reached, the chat becomes a "Get in touch" form. If the server is unreachable, visitors see your contact options.
+- If every model fails or a spending limit is reached, the chat becomes a "Get in touch" form, and goes back to the AI once the cause has passed.
+- If the server can't be reached, an open chat shows your contact options and keeps retrying. Visitors on their first visit see no chat button until it's back.
 - Answers interrupted by the platform are recovered and finished automatically.
+- Abuse limits: messages a visitor can leave per day, a daily cap on emails to visitors, and a cool-down on "wants you" alerts.
 
 **Costs under control**
 
@@ -48,7 +50,7 @@ widget.js  ── WebSocket ──>  ChatRoom Durable Object (one per chat)  ─
 Your inbox (/admin) ─ WebSocket ─> Hub Durable Object (live updates, your status)
 ```
 
-- **Widget:** Preact inside a Shadow DOM, about 20 KB gzipped. It reads your site's CSS variables, so it follows your themes and light/dark mode without its styles leaking into your page.
+- **Widget:** Preact inside a Shadow DOM, about 24 KB gzipped. It reads your site's CSS variables, so it follows your themes and light/dark mode without its styles leaking into your page.
 - **One Durable Object per chat:** holds the conversation, streams the answer, runs the model ladder and the time limits, and survives restarts.
 - **Omnara agent per chat:** the AI keeps the conversation's context and looks things up in a read-only memory store holding your pages as Markdown, each tagged with its public URL. It reads before it answers instead of guessing.
 - **kb-sync:** copies your site into that store: Markdown docs straight from your repo, plus your live pages through the sitemap.
@@ -60,17 +62,28 @@ Your inbox (/admin) ─ WebSocket ─> Hub Durable Object (live updates, your st
 | `packages/inbox` | React inbox and stats, served at `/admin` |
 | `packages/shared` | Protocol and config types |
 | `tools/kb-sync` | Syncs a site's content into its memory store and pushes its config |
+| `examples/my-site` | A site's `chatbot/` folder to copy |
+
+## Built on Omnara
+
+[Omnara](https://omnara.com) runs the AI side. It's open source and can be self-hosted, anyone can sign up, and new accounts get free credits. The chatbot uses:
+
+- **An agent per chat** that keeps the whole conversation, so the server never resends the history.
+- **A read-only memory store per site** holding the site's pages as Markdown. The agent looks things up before it answers.
+- **The model ladder:** any model your Omnara project can use, with reasoning effort per model. When one fails, the same agent switches to the next.
+- **Custom tools:** leave a message for the owner, call the owner into the chat, check the latest release.
+- **Resumable event streams:** an answer cut off by the platform is picked up again from Omnara's event log and finished.
 
 ## What it costs
 
-- **AI:** with DeepSeek V4.1 Flash, a typical answer costs a fraction of a cent (about $0.002 to $0.007, depending on how much it reads). The ladder, effort per model and every limit are yours to set.
-- **Cloudflare:** the free plan covers it: Workers (100k requests a day per account), Durable Objects and D1.
+- **AI:** you pay the model's own price. With DeepSeek V4.1 Flash a typical answer costs a fraction of a cent (about $0.002 to $0.007, depending on how much it reads). The ladder, effort per model and every limit are yours to set.
+- **Cloudflare:** the free plan covers it: Workers (100k requests a day per account), Durable Objects and D1. Streaming answers can use more CPU than the free plan's 10 ms per request; in practice they still complete, but a high-traffic site may want the paid plan.
 - **Email (optional):** [Resend](https://resend.com)'s free plan (100 emails a day).
 - **Alerts (optional):** ntfy, free or self-hosted.
 
 ## Quick start (local)
 
-Requires Node 22 or newer. The built-in **scripted brain** needs no API key, so you can try everything for free.
+Requires Node 22 or newer (23.6 or newer for kb-sync). The built-in **scripted brain** needs no API key, so you can try everything for free.
 
 ```bash
 npm install
@@ -82,9 +95,11 @@ npm run dev:widget     # Playground on http://127.0.0.1:5290
 npm run dev:inbox      # inbox on http://127.0.0.1:5291/admin/
 ```
 
-Open the Playground, keep Brain on **Scripted**, and chat. Add your Omnara values to `.dev.vars` and switch Brain to **Real** to use the AI.
+Open the Playground, keep Brain on **Scripted**, and chat. It starts on a built-in **Demo** site until you add your own. Add your Omnara values to `.dev.vars` and switch Brain to **Real** to use the AI.
 
 ## Deploy your own
+
+It's not one-click yet: expect to spend some time on Cloudflare and Omnara setup.
 
 1. **Omnara:** create a project, grant it the models you want (for example DeepSeek V4.1 Flash and GPT-6 Luna) and create an organisation API key.
 2. **Cloudflare:**
@@ -103,7 +118,7 @@ Open the Playground, keep Brain on **Scripted**, and chat. Add your Omnara value
 
 ## Add a site
 
-Create a `chatbot/` folder in your site's repo:
+Create a `chatbot/` folder in your site's repo. [`examples/my-site/chatbot`](examples/my-site/chatbot) is a working starting point:
 
 - `chatbot.config.json`: the site's settings (name, wording, starter prompts per page, theme map, allowed origins, memory store, tools, alerts, email) and the content sources to sync (a sitemap, Markdown folders, single files or URLs).
 - `instruction.md`: what the AI should know about this site: a short primer, where things are in its knowledge, how to handle common questions, and your contact options. It's sent with every chat, after the shared rules in `packages/server/src/brain/base-rules.md`.
@@ -122,7 +137,9 @@ node tools/kb-sync/sync.ts ../my-site/chatbot/chatbot.config.json --env packages
 ```
 
 - **Theme:** map the widget's colours, radius and font to your site's CSS variables in the site config (`theme`), for example `"accent": "var(--color-primary)"`. Light/dark and theme switches follow automatically.
-- **Layout:** launcher style, corner, panel size, suggestion style and where "Talk to a person" sits are per-site settings (`ui`).
+- **Layout:** launcher style, corner, panel size, suggestion style, how many starter questions show, where "Talk to a person" sits and what it shows while you're away are per-site settings (`ui`).
+- **Greeting:** a small bubble, or the chat opening by itself once a visitor has spent a while on the site (`proactive`).
+- **Credit line (optional):** `credit` holds a short text and link, shown in the menu or under the message box (`ui.credit`). `aboutChat` is what the AI may say when asked how the chat was built; leave it empty and it says nothing about it.
 - **From your own code:** `window.WebsiteChatbot.open()`, `.close()` and `.newChat()`.
 
 ## Settings
@@ -130,7 +147,7 @@ node tools/kb-sync/sync.ts ../my-site/chatbot/chatbot.config.json --env packages
 The inbox's Settings page holds everything that costs money or changes behaviour:
 
 - **Models:** the model ladder, with effort per model
-- **Limits:** per chat, per day, per visitor
+- **Limits:** per chat, per day, per visitor, plus the abuse limits on messages left, emails to visitors and alerts
 - **Time limits:** silence, per model, total, and when "Still working on it" shows
 - **Cooldowns** for failing models
 - **Your status:** idle time before you show as away
@@ -157,6 +174,14 @@ IP addresses are used only for the bot check and aren't stored. A random visitor
 - The AI answers from what's synced; re-run kb-sync after big site changes.
 - Not yet built: a fallback for when Omnara itself is down, and a helper that detects you're at your computer without the inbox open.
 
+## Security
+
+To report a security problem, see [SECURITY.md](SECURITY.md).
+
 ## Licence
 
-To be decided.
+[AGPL-3.0](LICENSE). Copyright 2026 Anshul Jain.
+
+You can use, change and self-host it. If you run a changed version for other people, you share your changes under the same licence. The widget is a separate program loaded by a script tag, so adding it to your site doesn't change your site's own licence.
+
+Need other licence terms? [Get in touch](https://www.anshuljain.net/contact).
