@@ -405,6 +405,14 @@ async function omnara<T>(method: string, path: string, body?: BodyInit, json = t
   return { status: res.status, data: (text ? JSON.parse(text) : null) as T };
 }
 
+/** Digest of a file as it is in the store, or null when it can't be read. */
+async function storeFileDigest(store: string, path: string): Promise<string | null> {
+  const res = await fetch(`${OMNARA}/orgs/${need("OMNARA_ORG_ID")}/projects/${need("OMNARA_PROJECT_ID")}/memory-stores/${store}/file?path=${encodeURIComponent(path)}`, {
+    headers: { Authorization: `Bearer ${need("OMNARA_API_KEY")}`, "User-Agent": "website-chatbot-kb-sync/0.1" },
+  });
+  return res.ok ? digest(await res.text()) : null;
+}
+
 async function storeId(name: string): Promise<string | null> {
   let cursor: string | null = null;
   do {
@@ -713,10 +721,12 @@ async function main(): Promise<void> {
       } else if (flag("--prune") || live) {
         const failed: string[] = [];
         for (const p of stale) {
-          let r = await omnara("DELETE", `/memory-stores/${store}/file?path=${encodeURIComponent(p)}`);
-          if (r.status === 409) {
-            const cur = (r.data as { current_digest?: string }).current_digest;
-            if (cur) r = await omnara("DELETE", `/memory-stores/${store}/file?path=${encodeURIComponent(p)}&expected_digest=${encodeURIComponent(cur)}`);
+          const at = `/memory-stores/${store}/file?path=${encodeURIComponent(p)}`;
+          let r = await omnara("DELETE", at);
+          // Deletes need the file's current digest: a 409 carries it; a 400 (digest required) means reading the file.
+          if (r.status === 409 || r.status === 400) {
+            const cur = (r.data as { current_digest?: string } | null)?.current_digest ?? (await storeFileDigest(store, p));
+            if (cur) r = await omnara("DELETE", `${at}&expected_digest=${encodeURIComponent(cur)}`);
           }
           if (r.status >= 300 && r.status !== 404) failed.push(`${p} (HTTP ${r.status})`);
         }

@@ -254,8 +254,19 @@ function Menu({ client, site: s, v, onPast }: { client: ChatClient; site: Public
   const [email, setEmail] = useState(v.status.visitorEmail ?? "");
   const u = ui.value;
   const close = () => setView({ menu: false });
+  const ref = useRef<HTMLDivElement>(null);
+  // A press anywhere outside the menu closes it; the "Chat options" button toggles it itself.
+  useEffect(() => {
+    const onDown = (e: PointerEvent) => {
+      const path = e.composedPath();
+      const toggle = path.some((n) => n instanceof Element && n.getAttribute("aria-label") === "Chat options");
+      if (ref.current && !path.includes(ref.current) && !toggle) setView({ menu: false });
+    };
+    document.addEventListener("pointerdown", onDown, true);
+    return () => document.removeEventListener("pointerdown", onDown, true);
+  }, []);
   return (
-    <div class="menu" role="menu">
+    <div class="menu" role="menu" ref={ref}>
       <button role="menuitem" onClick={() => (close(), void client.newChat())}>
         <Icon name="plus" /> Start new chat
       </button>
